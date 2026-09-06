@@ -1,1 +1,0 @@
-if logging out the volunteer user the logged in user should also be removed from the memory
