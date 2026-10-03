@@ -47,3 +47,35 @@ keystore/*.keystore
 keystore/*.jks
 google-services.json
 android/app/google-services.json
+
+# ==============================
+# Large binary / build artifacts
+# ==============================
+
+# Android App Bundles & APKs
+*.aab
+*.apk
+
+# iOS builds
+*.ipa
+*.xcarchive
+
+# Video files (too large for GitHub)
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# Build output folders
+builds/
+android/app/build/
+android/.gradle/
+ios/build/
+ios/Pods/
+dist/
+
+# Store asset bundles & videos (keep only images/metadata)
+store-assets/bundle/
+store-assets/video/*.mp4
+store-assets/video/*.mov

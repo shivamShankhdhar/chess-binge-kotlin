@@ -1,0 +1,74 @@
+# ============================
+# Large binary / build outputs
+# ============================
+
+# Android App Bundles & APKs
+*.aab
+*.apk
+
+# iOS builds
+*.ipa
+*.xcarchive
+
+# Video files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# ============================
+# Sensitive / env-files folder
+# ============================
+env-files/
+
+# ============================
+# macOS
+# ============================
+.DS_Store
+.AppleDouble
+.LSOverride
+**/.DS_Store
+
+# ============================
+# Node
+# ============================
+node_modules/
+
+# ============================
+# Expo / React Native
+# ============================
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+.metro-health-check*
+
+# ============================
+# Native build outputs
+# ============================
+/android/app/build/
+/ios/build/
+*.orig.*
+
+# ============================
+# Keys & secrets (never commit)
+# ============================
+*.jks
+*.p8
+*.p12
+*.key
+*.keystore
+*.mobileprovision
+*.pem
+google-services.json
+GoogleService-Info.plist
+
+# ============================
+# Misc
+# ============================
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.tsbuildinfo
+.env*.local
