@@ -29,7 +29,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -37,6 +42,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import bizora.app.data.model.*
+import bizora.app.data.remote.EmployerJoinRequestItem
 import bizora.app.data.repository.BizoraRepository
 import bizora.app.ui.components.*
 import bizora.app.ui.dialogs.*
@@ -53,7 +59,8 @@ enum class EmployerTab {
     TODAY,
     ATTENDANCE,
     EMPLOYEES,
-    WORKPLACE
+    WORKPLACE,
+    SETTINGS
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -61,7 +68,10 @@ enum class EmployerTab {
 fun EmployerDashboard(
     repository: BizoraRepository,
     onSignOut: () -> Unit = {},
-    onToggleTheme: () -> Unit = {}
+    onToggleTheme: () -> Unit = {},
+    isDark: Boolean = false,
+    onLockAppNow: () -> Unit = {},
+    onCreateNewWorkplace: () -> Unit = {}
 ) {
     val colors = LocalBizoraColors.current
     val context = LocalContext.current
@@ -75,20 +85,34 @@ fun EmployerDashboard(
     val todaySession by repository.todaySession.collectAsState()
     val roster by repository.roster.collectAsState()
     val requests by repository.requests.collectAsState()
+    val workplaceJoinRequests by repository.workplaceJoinRequests.collectAsState()
     val employees by repository.employees.collectAsState()
     val teams by repository.teams.collectAsState()
+    val visibleTeams = remember(teams) {
+        teams.filterNot { team ->
+            team.isDefault && team.name.equals("General", ignoreCase = true) &&
+                team.members.none { it.role.equals("EMPLOYEE", ignoreCase = true) }
+        }
+    }
     val notifications by repository.notifications.collectAsState()
+    val currentUser by repository.currentUser.collectAsState()
+    val mpinStatus by repository.mpinStatus.collectAsState()
     val isEmployerTodayLoading by repository.isEmployerTodayLoading.collectAsState()
     val isRosterLoading by repository.isRosterLoading.collectAsState()
     val isRequestsLoading by repository.isRequestsLoading.collectAsState()
     val isEmployeesLoading by repository.isEmployeesLoading.collectAsState()
 
+    var showProfileScreen by remember { mutableStateOf(false) }
+    var showSecuritySettingsScreen by remember { mutableStateOf(false) }
+    var isAppLockDismissedForSession by remember { mutableStateOf(false) }
     var showWorkplaceSwitcher by remember { mutableStateOf(false) }
     var showNotifications by remember { mutableStateOf(false) }
     var showAddEmployeeModal by remember { mutableStateOf(false) }
+    var showManualAttendanceDialog by remember { mutableStateOf(false) }
     var preselectedTeamIdForAdd by remember { mutableStateOf<String?>(null) }
     var showCreateTeamModal by remember { mutableStateOf(false) }
-    var employeesActiveSubTab by remember { mutableStateOf("Teams") }
+    var employeesActiveSubTab by remember { mutableStateOf("All") }
+    var workplaceActiveSubTab by remember { mutableStateOf("Overview") }
     var employeesSelectedTeamFilter by remember { mutableStateOf<String?>(null) }
     var showCloseConfirmDialog by remember { mutableStateOf(false) }
     var showAttendanceQrModal by remember { mutableStateOf(false) }
@@ -107,6 +131,28 @@ fun EmployerDashboard(
     var filterAttendanceRange by remember { mutableStateOf("Today") }
     var showRatingModal by remember { mutableStateOf(false) }
     var showUpdateModal by remember { mutableStateOf(false) }
+    var isPullRefreshing by remember { mutableStateOf(false) }
+
+    if (showSecuritySettingsScreen) {
+        SecuritySettingsScreen(
+            repository = repository,
+            onBack = { showSecuritySettingsScreen = false },
+            onLockAppNow = onLockAppNow
+        )
+        return
+    }
+
+    if (showProfileScreen) {
+        ProfileSettingsScreen(
+            repository = repository,
+            onBack = { showProfileScreen = false },
+            onOpenSecuritySettings = { showSecuritySettingsScreen = true },
+            onToggleTheme = onToggleTheme,
+            isDark = isDark,
+            onSignOut = onSignOut
+        )
+        return
+    }
 
     // Dedicated Employee Details Full Screen (matching React Native employee-detail screen)
     if (viewingEmployeeDetails != null) {
@@ -126,16 +172,20 @@ fun EmployerDashboard(
                 viewingEmployeeDetails = null
                 Toast.makeText(context, "$name has been deactivated", Toast.LENGTH_SHORT).show()
             },
-            onExportReportClick = { _ ->
+            onExportReportClick = { _, format ->
                 AdMobInterstitialHelper.showAdThenExecute(context) {
                     exportedReportForEmployeeDetails = ReportExporter.exportIndividualEmployeeReport(
                         context = context,
                         workplaceName = activeWorkplace.name,
                         employeeName = emp.name,
                         employeeCode = emp.employeeCode,
-                        rosterHistory = roster
+                        rosterHistory = roster,
+                        format = format
                     )
                 }
+            },
+            onRefresh = {
+                repository.refreshWorkplaceDataAwait()
             }
         )
 
@@ -162,29 +212,56 @@ fun EmployerDashboard(
         return
     }
 
+    if (showAddEmployeeModal) {
+        InviteMemberScreen(
+            workplaceName = activeWorkplace.name,
+            teams = visibleTeams,
+            initialTeamId = preselectedTeamIdForAdd,
+            onBack = {
+                showAddEmployeeModal = false
+                preselectedTeamIdForAdd = null
+            },
+            onCreateTeam = {
+                showCreateTeamModal = true
+            },
+            onInvite = { name, email, teamId ->
+                repository.addEmployee(name, email = email, teamId = teamId)
+            }
+        )
+        if (showCreateTeamModal) {
+            CreateTeamDialog(
+                onDismiss = { showCreateTeamModal = false },
+                onCreateTeam = { name, description, color ->
+                    repository.createTeam(name, description, color).map { }
+                }
+            )
+        }
+        return
+    }
+
     // Bottom Navigation Tabs
     val tabs = remember {
         listOf(
             BottomTabItem(
                 key = EmployerTab.TODAY,
-                label = "Today",
-                iconRenderer = { color, size, active -> HomeTabIcon(color = color, size = size, active = active) },
+                label = "Home",
+                iconRenderer = { _, size, active -> HomeTabIcon(size = size, active = active) },
                 badgeCount = 0
             ),
             BottomTabItem(
                 key = EmployerTab.ATTENDANCE,
                 label = "Attendance",
-                iconRenderer = { color, size, active -> AttendanceTabIcon(color = color, size = size, active = active) }
-            ),
-            BottomTabItem(
-                key = EmployerTab.EMPLOYEES,
-                label = "Employees",
-                iconRenderer = { color, size, active -> EmployeesTabIcon(color = color, size = size, active = active) }
+                iconRenderer = { _, size, active -> AttendanceTabIcon(size = size, active = active) }
             ),
             BottomTabItem(
                 key = EmployerTab.WORKPLACE,
                 label = "Workplace",
-                iconRenderer = { color, size, active -> WorkplaceTabIcon(color = color, size = size, active = active) }
+                iconRenderer = { _, size, active -> WorkplaceTabIcon(size = size, active = active) }
+            ),
+            BottomTabItem(
+                key = EmployerTab.SETTINGS,
+                label = "Settings",
+                iconRenderer = { _, size, active -> SettingsTabIcon(size = size, active = active) }
             )
         )
     }
@@ -194,8 +271,8 @@ fun EmployerDashboard(
             when (activeTab) {
                 EmployerTab.TODAY -> {
                     val user by repository.currentUser.collectAsState(null)
-                    val effectiveName = user?.name ?: "Demo Employer"
-                    val effectiveEmail = user?.email ?: "demo_employer@test.com"
+                    val effectiveName = user?.name?.takeIf { it.isNotBlank() } ?: "Employer"
+                    val effectiveEmail = user?.email?.takeIf { it.isNotBlank() } ?: "employer@bizora.app"
                     val initials = effectiveName.split(" ")
                         .mapNotNull { it.firstOrNull()?.toString() }
                         .take(2)
@@ -209,8 +286,11 @@ fun EmployerDashboard(
                         avatarUrl = user?.avatarUrl,
                         notificationCount = notifications.count { !it.read },
                         onNotificationsClick = { showNotifications = true },
-                        onProfileClick = { activeTab = EmployerTab.WORKPLACE },
-                        onSearchClick = { activeTab = EmployerTab.EMPLOYEES }
+                        onProfileClick = { activeTab = EmployerTab.SETTINGS },
+                        onSearchClick = {
+                            workplaceActiveSubTab = "Teams"
+                            activeTab = EmployerTab.WORKPLACE
+                        }
                     )
                 }
                 EmployerTab.ATTENDANCE -> {
@@ -228,37 +308,40 @@ fun EmployerDashboard(
                 }
                 EmployerTab.WORKPLACE -> {
                     WorkplaceTopBar(
-                        workplaceName = activeWorkplace.name,
+                        workplaceName = activeWorkplace.name
+                    )
+                }
+                EmployerTab.SETTINGS -> {
+                    SettingsTopBar(
                         onSignOutClick = { showSignOutConfirm = true }
                     )
                 }
             }
         },
         bottomBar = {
-            BizoraBottomBar(
-                tabs = tabs,
-                activeTab = activeTab,
-                onTabSelected = { activeTab = it }
-            )
-        },
-        floatingActionButton = {
-            if (activeTab == EmployerTab.EMPLOYEES) {
-                FloatingActionButton(
-                    onClick = {
-                        preselectedTeamIdForAdd = null
-                        showAddEmployeeModal = true
-                    },
-                    containerColor = colors.brandPrimary,
-                    contentColor = colors.textInverse,
-                    shape = RoundedCornerShape(18.dp)
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "Add Employee", modifier = Modifier.size(28.dp))
-                }
+            Column {
+                AdBanner()
+                BizoraBottomBar(
+                    tabs = tabs,
+                    activeTab = activeTab,
+                    onTabSelected = { activeTab = it }
+                )
             }
         },
         containerColor = colors.canvas
     ) { padding ->
-        Box(
+        BizoraPullRefreshBox(
+            isRefreshing = isPullRefreshing,
+            onRefresh = {
+                isPullRefreshing = true
+                coroutineScope.launch {
+                    try {
+                        repository.refreshWorkplaceDataAwait()
+                    } finally {
+                        isPullRefreshing = false
+                    }
+                }
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
@@ -277,8 +360,12 @@ fun EmployerDashboard(
                             session = todaySession,
                             roster = roster,
                             requests = requests,
-                            teams = teams,
+                            joinRequests = workplaceJoinRequests,
+                            teams = visibleTeams,
                             totalEmployeesCount = employees.size,
+                            showAppLockPrompt = (mpinStatus?.hasMpin != true && mpinStatus?.appLockEnabled != true && currentUser?.hasMpin != true && currentUser?.appLockEnabled != true && !repository.hasMpin() && !repository.isAppLockEnabled() && !isAppLockDismissedForSession),
+                            onSetupAppLock = { showSecuritySettingsScreen = true },
+                            onDismissAppLock = { isAppLockDismissedForSession = true },
                             onOpenQrModal = { showAttendanceQrModal = true },
                             onOpenJoinQr = {
                                 preselectedTeamIdForAdd = null
@@ -289,24 +376,30 @@ fun EmployerDashboard(
                                 showJoinQrModal = true
                             },
                             onSwitchWorkplace = { showWorkplaceSwitcher = true },
-                            onManualMark = { manualMarkItem = it },
+                            onManualMark = {
+                                manualMarkItem = it
+                                showManualAttendanceDialog = true
+                            },
                             onApproveRequest = { repository.approveRequest(it) },
                             onRejectRequest = { rejectTargetId = it },
+                            onApproveJoinRequest = { repository.approveWorkplaceJoinRequest(it) },
+                            onRejectJoinRequest = { repository.rejectWorkplaceJoinRequest(it) },
+                            onNavigateToJoinRequests = {
+                                employeesActiveSubTab = "Requests"
+                                activeTab = EmployerTab.EMPLOYEES
+                            },
                             onNavigateToAttendance = { activeTab = EmployerTab.ATTENDANCE },
                             onNavigateToEmployees = {
-                                employeesActiveSubTab = "All"
-                                employeesSelectedTeamFilter = null
-                                activeTab = EmployerTab.EMPLOYEES
+                                workplaceActiveSubTab = "Teams"
+                                activeTab = EmployerTab.WORKPLACE
                             },
                             onNavigateToTeamsDirectory = {
-                                employeesActiveSubTab = "Teams"
-                                employeesSelectedTeamFilter = null
-                                activeTab = EmployerTab.EMPLOYEES
+                                workplaceActiveSubTab = "Teams"
+                                activeTab = EmployerTab.WORKPLACE
                             },
                             onNavigateToTeamRoster = { teamId ->
-                                employeesActiveSubTab = "All"
-                                employeesSelectedTeamFilter = teamId
-                                activeTab = EmployerTab.EMPLOYEES
+                                workplaceActiveSubTab = "Teams"
+                                activeTab = EmployerTab.WORKPLACE
                             },
                             onNavigateToWorkplace = { activeTab = EmployerTab.WORKPLACE },
                             onAddEmployee = { teamId ->
@@ -332,7 +425,10 @@ fun EmployerDashboard(
                     onOpenQrModal = { showAttendanceQrModal = true },
                     onApproveRequest = { repository.approveRequest(it) },
                     onRejectRequest = { rejectTargetId = it },
-                    onManualMark = { manualMarkItem = it },
+                    onManualMark = {
+                        manualMarkItem = it
+                        showManualAttendanceDialog = true
+                    },
                     onOpenHelp = { showHowItWorksModal = true },
                     onOpenFilterAttendance = { showFilterAttendanceModal = true },
                     onEmployeeClick = { viewingEmployeeDetails = it }
@@ -340,7 +436,8 @@ fun EmployerDashboard(
 
                 EmployerTab.EMPLOYEES -> EmployeesScreenView(
                     employees = employees,
-                    teams = teams,
+                    teams = visibleTeams,
+                    joinRequests = workplaceJoinRequests,
                     isEmployeesLoading = isEmployeesLoading,
                     initialSubTab = employeesActiveSubTab,
                     initialSelectedTeamId = employeesSelectedTeamFilter,
@@ -358,17 +455,46 @@ fun EmployerDashboard(
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Invite Link", "https://bizora.app/join?code=$code"))
                         Toast.makeText(context, "Invite link copied to clipboard!", Toast.LENGTH_SHORT).show()
-                    }
+                    },
+                    onApproveJoinRequest = { repository.approveWorkplaceJoinRequest(it) },
+                    onRejectJoinRequest = { repository.rejectWorkplaceJoinRequest(it) }
                 )
 
                 EmployerTab.WORKPLACE -> WorkplaceScreenView(
                     workplace = activeWorkplace,
                     repository = repository,
+                    teams = visibleTeams,
+                    employees = employees,
+                    initialSubTab = workplaceActiveSubTab,
+                    onCreateTeamClick = { showCreateTeamModal = true },
+                    onAddEmployeeClick = { teamId ->
+                        preselectedTeamIdForAdd = teamId
+                        showAddEmployeeModal = true
+                    },
+                    onViewTeamMembers = { teamId ->
+                        workplaceActiveSubTab = "Teams"
+                        activeTab = EmployerTab.WORKPLACE
+                    },
                     onSwitchWorkplace = { showWorkplaceSwitcher = true },
-                    onOpenJoinQr = { showJoinQrModal = true },
+                    onOpenJoinQr = {
+                        preselectedTeamIdForAdd = null
+                        showJoinQrModal = true
+                    },
+                    onOpenJoinQrForTeam = { teamId ->
+                        preselectedTeamIdForAdd = teamId
+                        showJoinQrModal = true
+                    },
                     onShowRating = { showRatingModal = true },
                     onShowUpdate = { showUpdateModal = true },
+                    onOpenProfile = { activeTab = EmployerTab.SETTINGS },
+                    onOpenSecurity = { showSecuritySettingsScreen = true },
                     onSignOut = { showSignOutConfirm = true }
+                )
+
+                EmployerTab.SETTINGS -> SettingsScreenView(
+                    repository = repository,
+                    onOpenSecuritySettings = { showSecuritySettingsScreen = true },
+                    onSignOutClick = { showSignOutConfirm = true }
                 )
             }
         }
@@ -379,6 +505,7 @@ fun EmployerDashboard(
         WorkplaceSwitcherModal(
             workplaces = workplaces,
             activeWorkplaceId = activeWorkplace.id,
+            currentActiveWorkplace = activeWorkplace,
             onSelectWorkplace = {
                 repository.switchWorkplace(it.id)
                 showWorkplaceSwitcher = false
@@ -386,7 +513,7 @@ fun EmployerDashboard(
             onDismiss = { showWorkplaceSwitcher = false },
             onCreateNewWorkplace = {
                 showWorkplaceSwitcher = false
-                Toast.makeText(context, "Workplace creation flow", Toast.LENGTH_SHORT).show()
+                onCreateNewWorkplace()
             }
         )
     }
@@ -402,35 +529,23 @@ fun EmployerDashboard(
     }
 
     // Modal: Manual Attendance Record
-    if (manualMarkItem != null) {
+    if (showManualAttendanceDialog) {
         ManualAttendanceDialog(
             item = manualMarkItem,
-            allEmployees = roster,
-            onDismiss = { manualMarkItem = null },
+            allEmployees = if (roster.isNotEmpty()) roster else employees.map {
+                RosterItem(
+                    memberId = it.id,
+                    name = it.name,
+                    employeeCode = it.employeeCode,
+                    avatarUrl = it.avatarUrl
+                )
+            },
+            onDismiss = {
+                showManualAttendanceDialog = false
+                manualMarkItem = null
+            },
             onSave = { memberId, status, reason ->
                 repository.markManualAttendance(memberId, status, reason)
-                manualMarkItem = null
-            }
-        )
-    }
-
-    // Modal: Add Employee
-    if (showAddEmployeeModal) {
-        AddEmployeeDialog(
-            teams = teams,
-            initialTeamId = preselectedTeamIdForAdd,
-            onDismiss = {
-                showAddEmployeeModal = false
-                preselectedTeamIdForAdd = null
-            },
-            onCreateTeamClick = {
-                showAddEmployeeModal = false
-                showCreateTeamModal = true
-            },
-            onAdd = { name, code, email, teamId ->
-                repository.addEmployee(name, code, email, teamId = teamId)
-                showAddEmployeeModal = false
-                preselectedTeamIdForAdd = null
             }
         )
     }
@@ -440,15 +555,11 @@ fun EmployerDashboard(
         CreateTeamDialog(
             onDismiss = { showCreateTeamModal = false },
             onCreateTeam = { name, description, color ->
-                coroutineScope.launch {
-                    val res = repository.createTeam(name, description, color)
-                    if (res.isSuccess) {
-                        showCreateTeamModal = false
-                        Toast.makeText(context, "Team '$name' created successfully!", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, res.exceptionOrNull()?.message ?: "Failed to create team", Toast.LENGTH_SHORT).show()
-                    }
+                val res = repository.createTeam(name, description, color)
+                if (res.isSuccess) {
+                    Toast.makeText(context, "Team '$name' created successfully!", Toast.LENGTH_SHORT).show()
                 }
+                res.map { }
             }
         )
     }
@@ -509,8 +620,9 @@ fun EmployerDashboard(
             workplaceId = activeWorkplace.id,
             workplaceName = activeWorkplace.name,
             workplaceCode = activeWorkplace.formattedCode,
-            teams = teams,
+            teams = visibleTeams,
             initialTeamId = preselectedTeamIdForAdd,
+            repository = repository,
             onCreateTeam = { showCreateTeamModal = true },
             onDismiss = { showJoinQrModal = false }
         )
@@ -588,15 +700,22 @@ fun TodayScreenView(
     session: AttendanceSession?,
     roster: List<RosterItem>,
     requests: List<AttendanceRequestItem>,
+    joinRequests: List<EmployerJoinRequestItem> = emptyList(),
     teams: List<Team> = emptyList(),
     totalEmployeesCount: Int,
+    showAppLockPrompt: Boolean = false,
+    onSetupAppLock: () -> Unit = {},
+    onDismissAppLock: () -> Unit = {},
     onOpenQrModal: () -> Unit,
     onOpenJoinQr: () -> Unit = {},
     onOpenJoinQrForTeam: (String?) -> Unit = {},
     onSwitchWorkplace: () -> Unit,
-    onManualMark: (RosterItem) -> Unit,
+    onManualMark: (RosterItem?) -> Unit,
     onApproveRequest: (String) -> Unit,
     onRejectRequest: (String) -> Unit,
+    onApproveJoinRequest: (String) -> Unit = {},
+    onRejectJoinRequest: (String) -> Unit = {},
+    onNavigateToJoinRequests: () -> Unit = {},
     onNavigateToAttendance: () -> Unit,
     onNavigateToEmployees: () -> Unit,
     onNavigateToTeamsDirectory: () -> Unit = onNavigateToEmployees,
@@ -609,13 +728,10 @@ fun TodayScreenView(
     val colors = LocalBizoraColors.current
 
     val presentCount = roster.count { it.status == AttendanceStatus.PRESENT }
-    val pendingCount = requests.size
+    val pendingAttendanceCount = requests.size
+    val pendingJoinCount = joinRequests.count { it.status.equals("PENDING", ignoreCase = true) }
+    val totalApprovalsCount = pendingAttendanceCount + pendingJoinCount
     val effectiveEmployeesCount = if (totalEmployeesCount > 0) totalEmployeesCount else roster.size
-
-    val hour = java.time.LocalTime.now().hour
-    val isMorning = hour < 12
-    val attendanceActionText = if (isMorning) "Check in" else "Check out"
-    val attendanceSubtitle = if (isMorning) "Record your check-in" else "Record your checkout"
 
     val currentDateFormatted = remember {
         java.time.LocalDate.now().format(
@@ -627,16 +743,21 @@ fun TodayScreenView(
         modifier = Modifier
             .fillMaxSize()
             .background(colors.canvas),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 28.dp),
+        contentPadding = PaddingValues(start = 0.dp, end = 0.dp, top = 0.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. ACTIVE WORKPLACE CARD (Matches reference design)
+        // 1. ACTIVE WORKPLACE (Full-width light olive banner matching reference design)
         item {
+            val bannerBg = if (colors.isDark) Color(0xFF222C18) else Color(0xFFEFF5E4)
+            val borderLine = if (colors.isDark) Color(0xFF2E3A20) else Color(0xFFE2ECCF)
+            val iconBg = Color(0xFF36451C)
+            val textGreen = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C)
+            val chevronBg = if (colors.isDark) Color(0xFF2A361E) else Color(0xFFDCE8C8)
+
             Surface(
-                color = colors.surface,
-                shape = RoundedCornerShape(18.dp),
-                border = BorderStroke(1.dp, if (colors.isDark) Color(0xFF334155) else Color(0xFFE9ECE0)),
-                shadowElevation = 0.5.dp,
+                color = bannerBg,
+                shape = RectangleShape,
+                border = BorderStroke(1.dp, borderLine),
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { onSwitchWorkplace() }
@@ -644,52 +765,48 @@ fun TodayScreenView(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 13.dp),
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Dark Olive Green Icon Box with Building
+                    // Workplace Icon
                     Box(
                         modifier = Modifier
-                            .size(44.dp)
+                            .size(46.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF4B5927)),
+                            .background(iconBg),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Apartment,
-                            contentDescription = null,
+                            imageVector = Icons.Default.Storefront,
+                            contentDescription = "Workplace",
                             tint = Color.White,
                             modifier = Modifier.size(24.dp)
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(14.dp))
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = workplace.name,
-                            fontSize = 16.5.sp,
-                            fontWeight = FontWeight.Bold,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold,
                             color = colors.textPrimary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(top = 3.dp)
+                        Surface(
+                            color = if (colors.isDark) Color(0xFF2C391D) else Color(0xFFDCE8C8),
+                            shape = CircleShape,
+                            modifier = Modifier.padding(top = 4.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .background(Color(0xFF22C55E), CircleShape)
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
                             Text(
                                 text = "ACTIVE WORKPLACE",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.7.sp,
-                                color = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF4B5927)
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.5.sp,
+                                color = if (colors.isDark) Color(0xFF9AE6B4) else Color(0xFF36451C),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.5.dp)
                             )
                         }
                     }
@@ -697,15 +814,15 @@ fun TodayScreenView(
                     // Circular Dropdown Arrow
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(34.dp)
                             .clip(CircleShape)
-                            .background(if (colors.isDark) Color(0xFF1E293B) else Color(0xFFEFF2E7)),
+                            .background(chevronBg),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.KeyboardArrowDown,
                             contentDescription = "Switch Workplace",
-                            tint = if (colors.isDark) Color(0xFFF1F5F9) else Color(0xFF4B5927),
+                            tint = textGreen,
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -713,32 +830,43 @@ fun TodayScreenView(
             }
         }
 
-        // 2. TODAY'S OVERVIEW SECTION
-        item {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                // Section Title Row
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 10.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Today's overview",
-                        fontSize = 17.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = colors.textPrimary
-                    )
-                    Text(
-                        text = currentDateFormatted,
-                        fontSize = 13.5.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = colors.textSecondary
+        if (showAppLockPrompt) {
+            item {
+                Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    AppLockPromptCard(
+                        onSetupClick = onSetupAppLock,
+                        onDismissClick = onDismissAppLock
                     )
                 }
+            }
+        }
 
-                // 2x2 Quadrant Grid Card
+        // 2. TODAY'S SNAPSHOT CARD
+        item {
+            val dayOfWeekStr = remember {
+                java.time.LocalDate.now().format(
+                    java.time.format.DateTimeFormatter.ofPattern("EEE", java.util.Locale.ENGLISH)
+                ).uppercase()
+            }
+            val dayOfMonthStr = remember {
+                java.time.LocalDate.now().format(
+                    java.time.format.DateTimeFormatter.ofPattern("dd", java.util.Locale.ENGLISH)
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+            ) {
+                Text(
+                    text = "Today’s snapshot",
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.textPrimary,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+
                 Surface(
                     color = colors.surface,
                     shape = RoundedCornerShape(18.dp),
@@ -746,198 +874,259 @@ fun TodayScreenView(
                     shadowElevation = 0.5.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        // Top Row: Present + Pending
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        // Top Row: Date Pill + Status info + "Open QR" button
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(IntrinsicSize.Min),
+                            modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Top-Left: Present
-                            TodayOverviewQuadrantItem(
-                                iconBg = Color(0xFFEBF2DF),
-                                icon = {
-                                    Icon(
-                                        imageVector = Icons.Outlined.People,
-                                        contentDescription = null,
-                                        tint = Color(0xFF4B5927),
-                                        modifier = Modifier.size(22.dp)
+                            // Date Pill (e.g. TUE 06)
+                            Box(
+                                modifier = Modifier
+                                    .size(width = 52.dp, height = 54.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (colors.isDark) Color(0xFF25331C) else Color(0xFFEFF5E4)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = dayOfWeekStr,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF4B5927),
+                                        lineHeight = 14.sp
                                     )
-                                },
-                                value = presentCount.toString(),
-                                label = "Present",
-                                onClick = onNavigateToAttendance,
-                                modifier = Modifier.weight(1f)
+                                    Text(
+                                        text = dayOfMonthStr,
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (colors.isDark) Color(0xFFF1F5F9) else Color(0xFF1B2210),
+                                        lineHeight = 22.sp
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            // Separator line
+                            Box(
+                                modifier = Modifier
+                                    .width(1.dp)
+                                    .height(38.dp)
+                                    .background(if (colors.isDark) Color(0xFF334155) else Color(0xFFEFF2EA))
                             )
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            // Team Status
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Schedule,
+                                    contentDescription = null,
+                                    tint = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text(
+                                        text = "Your team, today",
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        letterSpacing = (-0.1).sp,
+                                        color = colors.textPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (presentCount == 0) "Waiting for the first check-in." else "$presentCount checked in today.",
+                                        fontSize = 13.5.sp,
+                                        color = colors.textSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(6.dp))
+
+                            // Open QR Pill Button
+                            Surface(
+                                onClick = onOpenQrModal,
+                                color = if (colors.isDark) Color(0xFF25331C) else Color(0xFFEFF5E4),
+                                shape = CircleShape,
+                                border = BorderStroke(1.dp, if (colors.isDark) Color(0xFF3D4F28) else Color(0xFFD6DEC3))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.QrCodeScanner,
+                                        contentDescription = null,
+                                        tint = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Text(
+                                        text = "Open QR",
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Divider
+                        HorizontalDivider(
+                            color = if (colors.isDark) Color(0xFF334155) else Color(0xFFEFF2EA),
+                            thickness = 1.dp,
+                            modifier = Modifier.padding(vertical = 14.dp)
+                        )
+
+                        // Bottom Row: Present & Pending requests
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Present Stat
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { onNavigateToAttendance() },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(46.dp)
+                                        .clip(CircleShape)
+                                        .background(if (colors.isDark) Color(0xFF25331C) else Color(0xFFEFF5E4)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(modifier = Modifier.size(24.dp)) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.Person,
+                                            contentDescription = null,
+                                            tint = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C),
+                                            modifier = Modifier
+                                                .size(22.dp)
+                                                .align(Alignment.CenterStart)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .size(10.dp)
+                                                .align(Alignment.BottomEnd)
+                                                .clip(CircleShape)
+                                                .background(if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = if (colors.isDark) Color(0xFF1B240D) else Color.White,
+                                                modifier = Modifier.size(7.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column {
+                                    Text(
+                                        text = presentCount.toString(),
+                                        fontSize = 22.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textPrimary,
+                                        lineHeight = 26.sp
+                                    )
+                                    Text(
+                                        text = "Present",
+                                        fontSize = 13.5.sp,
+                                        color = colors.textSecondary
+                                    )
+                                }
+                            }
 
                             // Vertical Divider
                             Box(
                                 modifier = Modifier
                                     .width(1.dp)
-                                    .fillMaxHeight(0.72f)
+                                    .height(44.dp)
                                     .background(if (colors.isDark) Color(0xFF334155) else Color(0xFFEFF2EA))
                             )
 
-                            // Top-Right: Pending
-                            TodayOverviewQuadrantItem(
-                                iconBg = Color(0xFFFEF3C7),
-                                icon = {
+                            Spacer(modifier = Modifier.width(14.dp))
+
+                            // Pending requests Stat
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable {
+                                        if (pendingJoinCount > 0) {
+                                            onNavigateToJoinRequests()
+                                        } else {
+                                            onNavigateToAttendance()
+                                        }
+                                    },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(46.dp)
+                                        .clip(CircleShape)
+                                        .background(if (colors.isDark) Color(0xFF3D2A14) else Color(0xFFFEF3C7)),
+                                    contentAlignment = Alignment.Center
+                                ) {
                                     Icon(
-                                        imageVector = Icons.Outlined.Schedule,
+                                        imageVector = Icons.Outlined.Assignment,
                                         contentDescription = null,
                                         tint = Color(0xFFD97706),
                                         modifier = Modifier.size(22.dp)
                                     )
-                                },
-                                value = pendingCount.toString(),
-                                label = "Pending",
-                                onClick = onNavigateToAttendance,
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
+                                }
 
-                        // Horizontal Divider
-                        HorizontalDivider(
-                            color = if (colors.isDark) Color(0xFF334155) else Color(0xFFEFF2EA),
-                            thickness = 1.dp
-                        )
+                                Spacer(modifier = Modifier.width(12.dp))
 
-                        // Bottom Row: Teams + Staff
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(IntrinsicSize.Min),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Bottom-Left: Teams
-                            TodayOverviewQuadrantItem(
-                                iconBg = Color(0xFFE0E7FF),
-                                icon = {
-                                    Icon(
-                                        imageVector = Icons.Outlined.Groups,
-                                        contentDescription = null,
-                                        tint = Color(0xFF3B82F6),
-                                        modifier = Modifier.size(22.dp)
+                                Column {
+                                    Text(
+                                        text = totalApprovalsCount.toString(),
+                                        fontSize = 22.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textPrimary,
+                                        lineHeight = 26.sp
                                     )
-                                },
-                                value = (if (teams.size > 1) teams.size else 2).toString(),
-                                label = "Teams",
-                                onClick = onNavigateToTeamsDirectory,
-                                modifier = Modifier.weight(1f)
-                            )
-
-                            // Vertical Divider
-                            Box(
-                                modifier = Modifier
-                                    .width(1.dp)
-                                    .fillMaxHeight(0.72f)
-                                    .background(if (colors.isDark) Color(0xFF334155) else Color(0xFFEFF2EA))
-                            )
-
-                            // Bottom-Right: Staff
-                            TodayOverviewQuadrantItem(
-                                iconBg = Color(0xFFDCFCE7),
-                                icon = {
-                                    Icon(
-                                        imageVector = Icons.Outlined.Person,
-                                        contentDescription = null,
-                                        tint = Color(0xFF15803D),
-                                        modifier = Modifier.size(22.dp)
+                                    Text(
+                                        text = "Pending requests",
+                                        fontSize = 13.5.sp,
+                                        color = colors.textSecondary
                                     )
-                                },
-                                value = (if (effectiveEmployeesCount > 0) effectiveEmployeesCount else 1).toString(),
-                                label = "Staff",
-                                onClick = onNavigateToEmployees,
-                                modifier = Modifier.weight(1f)
-                            )
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 3. YOUR ATTENDANCE BANNER CARD
+        // 3. QUICK ACTIONS SECTION
         item {
-            Surface(
-                color = if (colors.isDark) Color(0xFF1E293B) else Color(0xFFEEF3E6),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, if (colors.isDark) Color(0xFF334155) else Color(0xFFE0E7D6)),
-                modifier = Modifier.fillMaxWidth()
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(42.dp)
-                            .clip(CircleShape)
-                            .background(if (colors.isDark) Color(0xFF334155) else Color(0xFFDEE5D3)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Schedule,
-                            contentDescription = null,
-                            tint = if (colors.isDark) Color(0xFFF1F5F9) else Color(0xFF3D4A1E),
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Your attendance",
-                            fontSize = 15.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (colors.isDark) Color(0xFFF1F5F9) else Color(0xFF19240A)
-                        )
-                        Text(
-                            text = attendanceSubtitle,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Normal,
-                            color = if (colors.isDark) Color(0xFF94A3B8) else Color(0xFF5D6B47)
-                        )
-                    }
-
-                    Surface(
-                        color = Color(0xFF3D4A1E),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.clickable { onOpenQrModal() }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Outlined.Logout,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = attendanceActionText,
-                                fontSize = 13.5.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color.White
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. QUICK ACTIONS SECTION
-        item {
-            Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
                     text = "Quick actions",
-                    fontSize = 17.5.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.SemiBold,
                     color = colors.textPrimary,
                     modifier = Modifier.padding(bottom = 10.dp)
                 )
@@ -947,43 +1136,49 @@ fun TodayScreenView(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Row 1: Invite employee + View attendance
+                    // Row 1: Invite + Attendances
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         TodayQuickActionCard(
                             icon = Icons.Outlined.PersonAdd,
-                            title = "Invite employee",
+                            title = "Invite",
                             subtitle = "Add team members",
                             onClick = onOpenJoinQr,
                             modifier = Modifier.weight(1f)
                         )
                         TodayQuickActionCard(
                             icon = Icons.Outlined.CalendarMonth,
-                            title = "View attendance",
+                            title = "Attendances",
                             subtitle = "Check team activity",
                             onClick = onNavigateToAttendance,
                             modifier = Modifier.weight(1f)
                         )
                     }
 
-                    // Row 2: Approvals + Manage teams
+                    // Row 2: Approvals + Teams
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         TodayQuickActionCard(
-                            icon = Icons.Outlined.AssignmentTurnedIn,
+                            icon = Icons.Outlined.FactCheck,
                             title = "Approvals",
-                            subtitle = if (pendingCount > 0) "$pendingCount pending" else "0 pending",
-                            subtitleColor = if (pendingCount > 0) Color(0xFFD97706) else Color(0xFFB45309),
-                            onClick = onNavigateToAttendance,
+                            subtitle = if (totalApprovalsCount > 0) "$totalApprovalsCount pending" else "0 pending",
+                            subtitleColor = Color(0xFFEA580C),
+                            onClick = {
+                                if (pendingJoinCount > 0) {
+                                    onNavigateToJoinRequests()
+                                } else {
+                                    onNavigateToAttendance()
+                                }
+                            },
                             modifier = Modifier.weight(1f)
                         )
                         TodayQuickActionCard(
                             icon = Icons.Outlined.Groups,
-                            title = "Manage teams",
+                            title = "Teams",
                             subtitle = "Organize your teams",
                             onClick = onNavigateToTeamsDirectory,
                             modifier = Modifier.weight(1f)
@@ -993,10 +1188,77 @@ fun TodayScreenView(
             }
         }
 
-        // 5. TEAM OVERVIEW SECTION
+        // 3.5 PENDING JOIN REQUESTS (if any)
+        if (pendingJoinCount > 0) {
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Pending Approvals",
+                                fontSize = 19.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.textPrimary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Surface(
+                                color = if (colors.isDark) Color(0xFF3D2A14) else Color(0xFFFEF3C7),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text(
+                                    text = "$pendingJoinCount",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFD97706),
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "View all",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { onNavigateToJoinRequests() }
+                                .padding(vertical = 2.dp, horizontal = 4.dp)
+                        )
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        joinRequests.filter { it.status.equals("PENDING", ignoreCase = true) }
+                            .take(3)
+                            .forEach { req ->
+                                WorkplaceJoinRequestCard(
+                                    request = req,
+                                    onApprove = { onApproveJoinRequest(req.realId) },
+                                    onReject = { onRejectJoinRequest(req.realId) }
+                                )
+                            }
+                    }
+                }
+            }
+        }
+
+        // 4. WORKPLACE TEAMS SECTION
         item {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                // Header with "Team overview" and "View all >"
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+            ) {
+                // Header with "Workplace teams" and "View all >"
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1005,9 +1267,9 @@ fun TodayScreenView(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Team overview",
-                        fontSize = 17.5.sp,
-                        fontWeight = FontWeight.Bold,
+                        text = "Workplace teams",
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.SemiBold,
                         color = colors.textPrimary
                     )
                     Row(
@@ -1021,13 +1283,13 @@ fun TodayScreenView(
                             text = "View all",
                             fontSize = 13.5.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF4B5927)
+                            color = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C)
                         )
                         Spacer(modifier = Modifier.width(2.dp))
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                             contentDescription = null,
-                            tint = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF4B5927),
+                            tint = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C),
                             modifier = Modifier.size(16.dp)
                         )
                     }
@@ -1041,31 +1303,25 @@ fun TodayScreenView(
                     shadowElevation = 0.5.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    val displayTeams = remember(teams) {
-                        if (teams.size >= 2) {
-                            teams.take(4)
-                        } else if (teams.size == 1) {
-                            listOf(
-                                teams[0],
-                                Team(id = "engineering", workplaceId = workplace.id, name = "Engineering", memberCount = 1)
-                            )
-                        } else {
-                            listOf(
-                                Team(id = "general", workplaceId = workplace.id, name = "General", memberCount = 1, isDefault = true),
-                                Team(id = "engineering", workplaceId = workplace.id, name = "Engineering", memberCount = 1)
-                            )
-                        }
-                    }
+                    val displayTeams = teams.take(4)
 
                     Column(modifier = Modifier.fillMaxWidth()) {
+                        if (displayTeams.isEmpty()) {
+                            Text(
+                                text = "No teams yet. Create your first team to get started.",
+                                fontSize = 14.sp,
+                                color = colors.textSecondary,
+                                modifier = Modifier.padding(18.dp)
+                            )
+                        }
                         displayTeams.forEachIndexed { index, team ->
                             val dotColor = when (index % 4) {
-                                0 -> Color(0xFF556930) // Olive
-                                1 -> Color(0xFF2563EB) // Blue
-                                2 -> Color(0xFF7C3AED) // Purple
+                                0 -> Color(0xFF36451C) // Olive green
+                                1 -> Color(0xFF64748B) // Slate gray
+                                2 -> Color(0xFF2563EB) // Blue
                                 else -> Color(0xFF0D9488) // Teal
                             }
-                            val count = if (team.memberCount > 0) team.memberCount else 1
+                            val count = team.members.count { it.role.equals("EMPLOYEE", ignoreCase = true) }
                             val memberText = if (count == 1) "1 member" else "$count members"
                             val subtitleText = if (team.isDefault || team.name.equals("General", ignoreCase = true)) {
                                 "Default team • $memberText"
@@ -1089,13 +1345,13 @@ fun TodayScreenView(
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = team.name,
-                                        fontSize = 14.5.sp,
+                                        fontSize = 16.5.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = colors.textPrimary
                                     )
                                     Text(
                                         text = subtitleText,
-                                        fontSize = 12.sp,
+                                        fontSize = 14.sp,
                                         color = colors.textSecondary,
                                         modifier = Modifier.padding(top = 1.dp)
                                     )
@@ -1121,138 +1377,6 @@ fun TodayScreenView(
             }
         }
 
-        // 6. NO APPROVALS WAITING BANNER
-        item {
-            Surface(
-                color = if (colors.isDark) Color(0xFF1E293B) else Color(0xFFE5EEDC),
-                shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, if (colors.isDark) Color(0xFF334155) else Color(0xFFD8E4CD)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF4B5927)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(14.dp))
-
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "No approvals waiting",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (colors.isDark) Color(0xFFF1F5F9) else Color(0xFF1B240D)
-                        )
-                        Text(
-                            text = "You're all caught up.",
-                            fontSize = 12.sp,
-                            color = if (colors.isDark) Color(0xFF94A3B8) else Color(0xFF52613B)
-                        )
-                    }
-                }
-            }
-        }
-
-        // 7. ADVERTISEMENT BANNER
-        item {
-            Surface(
-                color = if (colors.isDark) Color(0xFF1E293B) else Color(0xFFE8ECEF),
-                shape = RoundedCornerShape(10.dp),
-                border = BorderStroke(1.dp, if (colors.isDark) Color(0xFF334155) else Color(0xFFDCE2E7)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(54.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Image,
-                        contentDescription = null,
-                        tint = Color(0xFF94A3B8),
-                        modifier = Modifier.size(24.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "Advertisement",
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (colors.isDark) Color(0xFFCBD5E1) else Color(0xFF475569)
-                        )
-                        Text(
-                            text = "This is a 320x50 test ad.",
-                            fontSize = 10.5.sp,
-                            color = if (colors.isDark) Color(0xFF94A3B8) else Color(0xFF64748B)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TodayOverviewQuadrantItem(
-    iconBg: Color,
-    icon: @Composable () -> Unit,
-    value: String,
-    label: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val colors = LocalBizoraColors.current
-    Row(
-        modifier = modifier
-            .clickable { onClick() }
-            .padding(horizontal = 14.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .clip(CircleShape)
-                .background(iconBg),
-            contentAlignment = Alignment.Center
-        ) {
-            icon()
-        }
-        Spacer(modifier = Modifier.width(12.dp))
-        Column {
-            Text(
-                text = value,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = colors.textPrimary,
-                lineHeight = 28.sp
-            )
-            Text(
-                text = label,
-                fontSize = 12.5.sp,
-                fontWeight = FontWeight.Normal,
-                color = colors.textSecondary
-            )
-        }
     }
 }
 
@@ -1267,46 +1391,45 @@ private fun TodayQuickActionCard(
 ) {
     val colors = LocalBizoraColors.current
     Surface(
+        onClick = onClick,
         color = colors.surface,
         shape = RoundedCornerShape(14.dp),
         border = BorderStroke(1.dp, if (colors.isDark) Color(0xFF334155) else Color(0xFFE8ECE1)),
-        modifier = modifier.clickable { onClick() }
+        modifier = modifier
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 11.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(35.dp)
+                    .size(36.dp)
                     .clip(RoundedCornerShape(9.dp))
-                    .background(if (colors.isDark) Color(0xFF334155) else Color(0xFFEFF4E8)),
+                    .background(if (colors.isDark) Color(0xFF25331C) else Color(0xFFEFF5E4)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF4B5927),
-                    modifier = Modifier.size(18.dp)
+                    tint = if (colors.isDark) Color(0xFF86EFAC) else Color(0xFF36451C),
+                    modifier = Modifier.size(19.dp)
                 )
             }
             Spacer(modifier = Modifier.width(6.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = (-0.3).sp,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
                     color = colors.textPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = subtitle,
-                    fontSize = 10.5.sp,
+                    fontSize = 12.5.sp,
                     color = subtitleColor ?: colors.textSecondary,
-                    fontWeight = if (subtitleColor != null) FontWeight.Medium else FontWeight.Normal,
-                    letterSpacing = (-0.2).sp,
+                    fontWeight = if (subtitleColor != null) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 1.dp)
@@ -1575,14 +1698,14 @@ fun AttendanceTopBar(onHelpClick: () -> Unit) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "Attendance",
-                    fontSize = 24.sp,
+                    fontSize = 19.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = colors.textPrimary,
-                    letterSpacing = (-0.4).sp
+                    letterSpacing = (-0.3).sp
                 )
                 Text(
                     text = "Mark attendance, live QR & manual entry.",
-                    fontSize = 14.5.sp,
+                    fontSize = 14.sp,
                     color = colors.textSecondary
                 )
             }
@@ -1605,7 +1728,7 @@ fun AttendanceTopBar(onHelpClick: () -> Unit) {
                     )
                     Text(
                         text = "Help",
-                        fontSize = 14.sp,
+                        fontSize = 13.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = colors.textPrimary
                     )
@@ -1634,14 +1757,14 @@ fun EmployeesTopBar(onAddClick: () -> Unit) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "Employees",
-                    fontSize = 24.sp,
+                    fontSize = 19.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = colors.textPrimary,
-                    letterSpacing = (-0.4).sp
+                    letterSpacing = (-0.3).sp
                 )
                 Text(
                     text = "Manage staff, join links and access.",
-                    fontSize = 14.5.sp,
+                    fontSize = 14.sp,
                     color = colors.textSecondary
                 )
             }
@@ -1664,7 +1787,7 @@ fun EmployeesTopBar(onAddClick: () -> Unit) {
                     )
                     Text(
                         text = "Add",
-                        fontSize = 14.sp,
+                        fontSize = 13.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = colors.brandPrimary
                     )
@@ -1677,8 +1800,7 @@ fun EmployeesTopBar(onAddClick: () -> Unit) {
 // Top Bar: Workplace Tab
 @Composable
 fun WorkplaceTopBar(
-    workplaceName: String,
-    onSignOutClick: () -> Unit
+    workplaceName: String
 ) {
     val colors = LocalBizoraColors.current
     Surface(
@@ -1696,14 +1818,50 @@ fun WorkplaceTopBar(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "Workplace",
-                    fontSize = 24.sp,
+                    fontSize = 19.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = colors.textPrimary,
-                    letterSpacing = (-0.4).sp
+                    letterSpacing = (-0.3).sp
                 )
                 Text(
-                    text = "Settings, Wi-Fi and invite code.",
-                    fontSize = 14.5.sp,
+                    text = "Teams, Wi-Fi and invite.",
+                    fontSize = 14.sp,
+                    color = colors.textSecondary
+                )
+            }
+        }
+    }
+}
+
+// Top Bar: Settings Tab
+@Composable
+fun SettingsTopBar(
+    onSignOutClick: () -> Unit
+) {
+    val colors = LocalBizoraColors.current
+    Surface(
+        color = colors.surface,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Settings",
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.textPrimary,
+                    letterSpacing = (-0.3).sp
+                )
+                Text(
+                    text = "Account, preferences and security.",
+                    fontSize = 14.sp,
                     color = colors.textSecondary
                 )
             }
@@ -1736,6 +1894,72 @@ fun WorkplaceTopBar(
     }
 }
 
+/**
+ * Viewfinder accent with 4 rounded corner brackets framing the QR code
+ */
+@Composable
+private fun QrViewfinder(
+    bracketColor: Color,
+    modifier: Modifier = Modifier,
+    bracketLength: androidx.compose.ui.unit.Dp = 26.dp,
+    bracketWidth: androidx.compose.ui.unit.Dp = 3.5.dp,
+    cornerRadius: androidx.compose.ui.unit.Dp = 10.dp,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .drawBehind {
+                val strokePx = bracketWidth.toPx()
+                val lengthPx = bracketLength.toPx()
+                val radiusPx = cornerRadius.toPx()
+                val stroke = Stroke(width = strokePx, cap = StrokeCap.Round)
+
+                val w = size.width
+                val h = size.height
+
+                // Top-Left bracket
+                val topLeftPath = Path().apply {
+                    moveTo(0f, lengthPx)
+                    lineTo(0f, radiusPx)
+                    quadraticTo(0f, 0f, radiusPx, 0f)
+                    lineTo(lengthPx, 0f)
+                }
+                drawPath(topLeftPath, color = bracketColor, style = stroke)
+
+                // Top-Right bracket
+                val topRightPath = Path().apply {
+                    moveTo(w - lengthPx, 0f)
+                    lineTo(w - radiusPx, 0f)
+                    quadraticTo(w, 0f, w, radiusPx)
+                    lineTo(w, lengthPx)
+                }
+                drawPath(topRightPath, color = bracketColor, style = stroke)
+
+                // Bottom-Left bracket
+                val bottomLeftPath = Path().apply {
+                    moveTo(0f, h - lengthPx)
+                    lineTo(0f, h - radiusPx)
+                    quadraticTo(0f, h, radiusPx, h)
+                    lineTo(lengthPx, h)
+                }
+                drawPath(bottomLeftPath, color = bracketColor, style = stroke)
+
+                // Bottom-Right bracket
+                val bottomRightPath = Path().apply {
+                    moveTo(w - lengthPx, h)
+                    lineTo(w - radiusPx, h)
+                    quadraticTo(w, h, w, h - radiusPx)
+                    lineTo(w, h - lengthPx)
+                }
+                drawPath(bottomRightPath, color = bracketColor, style = stroke)
+            }
+            .padding(14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        content()
+    }
+}
+
 // Modal: Live Attendance QR & Session Manager
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1753,16 +1977,16 @@ fun AttendanceQrModal(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-        containerColor = colors.surface,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = if (colors.isDark) Color(0xFF141912) else Color(0xFFF8F8F1),
         dragHandle = {
             Box(
                 modifier = Modifier
-                    .padding(top = 10.dp, bottom = 6.dp)
-                    .width(36.dp)
+                    .padding(top = 10.dp, bottom = 4.dp)
+                    .width(38.dp)
                     .height(4.dp)
                     .clip(CircleShape)
-                    .background(colors.border)
+                    .background(Color(0xFFD5D5D0))
             )
         }
     ) {
@@ -1776,73 +2000,70 @@ fun AttendanceQrModal(
         ) {
             // Header
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 14.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(colors.brandTint),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(Icons.Default.QrCodeScanner, contentDescription = null, tint = colors.brandPrimary, modifier = Modifier.size(18.dp))
-                    }
-                    Column {
-                        Text("Today's Attendance QR", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
-                        Text(
-                            text = if (isOpen) "Session open • Employees can scan" else "Session closed",
-                            fontSize = 13.sp,
-                            color = colors.textSecondary
-                        )
-                    }
+                Column {
+                    Text(
+                        text = "Attendance QR",
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary,
+                        letterSpacing = (-0.3).sp
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = if (isOpen) "Employees can scan now" else "Session closed",
+                        fontSize = 14.sp,
+                        color = colors.textSecondary
+                    )
                 }
                 IconButton(
                     onClick = onDismiss,
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
-                        .background(colors.surfaceMuted)
+                        .background(if (colors.isDark) Color(0xFF22281F) else Color(0xFFF0F0EB))
                 ) {
-                    Icon(Icons.Default.Close, contentDescription = "Close", tint = colors.textSecondary, modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = if (colors.isDark) colors.textPrimary else Color(0xFF5E6455),
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            if (isOpen && session?.qrPayload != null) {
-                // Check-In / Check-Out tab toggle with generous height and equal balancing
+            if (isOpen && session != null) {
+                // Check-In / Check-Out Tab Switcher
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(54.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(colors.surfaceMuted)
-                        .border(1.dp, colors.border.copy(alpha = 0.7f), RoundedCornerShape(14.dp))
+                        .height(52.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (colors.isDark) Color(0xFF1E241B) else Color(0xFFF3F3ED))
+                        .border(
+                            1.dp,
+                            if (colors.isDark) Color(0xFF2E382A) else Color(0xFFE5E7DC),
+                            RoundedCornerShape(16.dp)
+                        )
                         .padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val isCheckIn = qrTab == "checkin"
-                    val checkInBg by animateColorAsState(
-                        targetValue = if (isCheckIn) colors.brandPrimary else Color.Transparent,
-                        label = "checkInBg"
-                    )
-                    val checkInContentColor by animateColorAsState(
-                        targetValue = if (isCheckIn) Color.White else colors.textPrimary,
-                        label = "checkInContentColor"
-                    )
+                    val checkInBg = if (isCheckIn) Color(0xFF5E7128) else Color.Transparent
+                    val checkInContentColor = if (isCheckIn) Color.White else colors.textPrimary
+                    val checkInIconTint = if (isCheckIn) Color.White else Color(0xFF5E7128)
 
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()
-                            .clip(RoundedCornerShape(10.dp))
+                            .clip(RoundedCornerShape(12.dp))
                             .background(checkInBg)
                             .clickable { qrTab = "checkin" },
                         contentAlignment = Alignment.Center
@@ -1854,13 +2075,13 @@ fun AttendanceQrModal(
                             Icon(
                                 imageVector = Icons.Default.Login,
                                 contentDescription = null,
-                                tint = if (isCheckIn) Color.White else colors.brandPrimary,
+                                tint = checkInIconTint,
                                 modifier = Modifier.size(19.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "Check-In",
-                                fontWeight = FontWeight.SemiBold,
+                                fontWeight = FontWeight.Bold,
                                 fontSize = 15.sp,
                                 color = checkInContentColor
                             )
@@ -1868,20 +2089,15 @@ fun AttendanceQrModal(
                     }
 
                     val isCheckOut = qrTab == "checkout"
-                    val checkOutBg by animateColorAsState(
-                        targetValue = if (isCheckOut) Color(0xFFD97706) else Color.Transparent,
-                        label = "checkOutBg"
-                    )
-                    val checkOutContentColor by animateColorAsState(
-                        targetValue = if (isCheckOut) Color.White else colors.textPrimary,
-                        label = "checkOutContentColor"
-                    )
+                    val checkOutBg = if (isCheckOut) Color(0xFFDE7007) else Color.Transparent
+                    val checkOutContentColor = if (isCheckOut) Color.White else colors.textPrimary
+                    val checkOutIconTint = if (isCheckOut) Color.White else Color(0xFFDE7007)
 
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()
-                            .clip(RoundedCornerShape(10.dp))
+                            .clip(RoundedCornerShape(12.dp))
                             .background(checkOutBg)
                             .clickable { qrTab = "checkout" },
                         contentAlignment = Alignment.Center
@@ -1893,13 +2109,13 @@ fun AttendanceQrModal(
                             Icon(
                                 imageVector = Icons.Default.Logout,
                                 contentDescription = null,
-                                tint = if (isCheckOut) Color.White else Color(0xFFD97706),
+                                tint = checkOutIconTint,
                                 modifier = Modifier.size(19.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "Check-Out",
-                                fontWeight = FontWeight.SemiBold,
+                                fontWeight = FontWeight.Bold,
                                 fontSize = 15.sp,
                                 color = checkOutContentColor
                             )
@@ -1907,85 +2123,235 @@ fun AttendanceQrModal(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Active Mode Pill Indicator
-                Surface(
-                    color = if (qrTab == "checkout") Color(0xFFFEF3C7) else colors.brandTint,
-                    shape = RoundedCornerShape(20.dp),
-                    border = BorderStroke(1.dp, if (qrTab == "checkout") Color(0xFFFDE68A) else colors.brandPrimary.copy(alpha = 0.25f))
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(if (qrTab == "checkout") Color(0xFFD97706) else colors.brandPrimary)
-                        )
-                        Spacer(modifier = Modifier.width(7.dp))
-                        Text(
-                            text = if (qrTab == "checkout") "Displaying Check-Out QR" else "Displaying Check-In QR",
-                            fontSize = 12.5.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (qrTab == "checkout") Color(0xFF92400E) else colors.brandPrimary
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                val rawPayload = session.qrPayload
+                val rawPayload = session.qrPayload ?: "bizora://attendance?session_id=${session.session.id}&action=checkin"
                 val currentPayload = if (qrTab == "checkout") {
-                    if (rawPayload.contains("action=checkin")) rawPayload.replace("action=checkin", "action=checkout")
-                    else if (rawPayload.contains("?")) "$rawPayload&action=checkout"
-                    else "$rawPayload?action=checkout"
+                    session.checkoutQrPayload ?: (
+                        if (rawPayload.contains("action=checkin")) rawPayload.replace("action=checkin", "action=checkout")
+                        else if (rawPayload.contains("?")) "$rawPayload&action=checkout"
+                        else "$rawPayload?action=checkout"
+                    )
                 } else {
                     rawPayload
                 }
 
+                // Main White Card containing "Session live", QR Viewfinder, Title & Subtitle
                 Surface(
-                    color = Color.White,
-                    shape = RoundedCornerShape(18.dp),
-                    border = BorderStroke(1.dp, colors.border),
-                    modifier = Modifier.padding(vertical = 4.dp)
+                    color = if (colors.isDark) Color(0xFF1E241B) else Color.White,
+                    shape = RoundedCornerShape(22.dp),
+                    border = BorderStroke(1.dp, if (colors.isDark) Color(0xFF2E382A) else Color(0xFFE8EDE1)),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Box(modifier = Modifier.padding(16.dp)) {
-                        QrCodeView(content = currentPayload, size = 195.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 18.dp, horizontal = 16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        // "Session live" pill badge
+                        val isCheckIn = qrTab == "checkin"
+                        val badgeBg = if (isCheckIn) {
+                            if (colors.isDark) Color(0xFF25301E) else Color(0xFFEEF1DF)
+                        } else {
+                            if (colors.isDark) Color(0xFF382613) else Color(0xFFFEF4E1)
+                        }
+                        val badgeBorder = if (isCheckIn) {
+                            if (colors.isDark) Color(0xFF384A2C) else Color(0xFFDEE3C8)
+                        } else {
+                            if (colors.isDark) Color(0xFF5A3C1C) else Color(0xFFFDE68A)
+                        }
+                        val badgeDotColor = if (isCheckIn) Color(0xFF5E7128) else Color(0xFFDE7007)
+                        val badgeTextColor = if (isCheckIn) {
+                            if (colors.isDark) Color(0xFFB5C99A) else Color(0xFF3B4A1A)
+                        } else {
+                            if (colors.isDark) Color(0xFFFCD34D) else Color(0xFF92400E)
+                        }
+
+                        Surface(
+                            color = badgeBg,
+                            shape = RoundedCornerShape(20.dp),
+                            border = BorderStroke(1.dp, badgeBorder)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(badgeDotColor)
+                                )
+                                Spacer(modifier = Modifier.width(7.dp))
+                                Text(
+                                    text = "Session live",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = badgeTextColor
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // QR Viewfinder with colored corner brackets
+                        val bracketColor = if (isCheckIn) Color(0xFF5E7128) else Color(0xFFDE7007)
+
+                        QrViewfinder(
+                            bracketColor = bracketColor,
+                            bracketLength = 26.dp,
+                            bracketWidth = 3.5.dp,
+                            cornerRadius = 10.dp
+                        ) {
+                            QrCodeView(
+                                content = currentPayload,
+                                size = 210.dp
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Text(
+                            text = if (isCheckIn) "Scan to check in" else "Scan to check out",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.textPrimary
+                        )
+
+                        Spacer(modifier = Modifier.height(3.dp))
+
+                        Text(
+                            text = "Attendance is recorded instantly.",
+                            fontSize = 13.5.sp,
+                            color = colors.textSecondary
+                        )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Time Information Card: Opened & Auto-closes
+                val openedDisplay = session.session.openedAt.trim().removePrefix("0").ifEmpty { "7:09 PM" }
+                val closesDisplay = session.session.expiresAt.trim().removePrefix("0").ifEmpty { "8:00 PM" }
+
+                Surface(
+                    color = if (colors.isDark) Color(0xFF1F241C) else Color(0xFFF5F5EE),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, if (colors.isDark) Color(0xFF2E382A) else Color(0xFFE8EDE1)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Left: Opened
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AccessTime,
+                                contentDescription = null,
+                                tint = if (colors.isDark) colors.textSecondary else Color(0xFF5E6455),
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "Opened",
+                                    fontSize = 12.sp,
+                                    color = colors.textSecondary
+                                )
+                                Text(
+                                    text = openedDisplay,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                            }
+                        }
+
+                        // Vertical Divider
+                        Box(
+                            modifier = Modifier
+                                .height(34.dp)
+                                .width(1.dp)
+                                .background(if (colors.isDark) Color(0xFF2E382A) else Color(0xFFE0E4D5))
+                        )
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        // Right: Auto-closes
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AccessTime,
+                                contentDescription = null,
+                                tint = if (colors.isDark) colors.textSecondary else Color(0xFF5E6455),
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = "Auto-closes",
+                                    fontSize = 12.sp,
+                                    color = colors.textSecondary
+                                )
+                                Text(
+                                    text = closesDisplay,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
                 Text(
-                    text = if (qrTab == "checkout")
-                        "Employees scan this to check out · Recorded instantly, no approval needed"
-                    else
-                        "Employees scan this to check in · Recorded instantly, no approval needed",
+                    text = "No approval needed.",
                     fontSize = 13.sp,
                     color = colors.textSecondary,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 12.dp)
+                    textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Opened at ${session.session.openedAt} • Auto-closes 08:00 PM",
-                    fontSize = 12.sp,
-                    color = colors.textSecondary
-                )
+                Spacer(modifier = Modifier.height(10.dp))
 
-                Spacer(modifier = Modifier.height(16.dp))
-                OutlinedButton(
+                Surface(
                     onClick = onCloseSession,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.danger),
+                    color = Color(0xFFFEE7E7),
                     shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth().height(50.dp)
+                    border = BorderStroke(1.dp, Color(0xFFFCA5A5)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
                 ) {
-                    Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(19.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("End Session", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                    Row(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PowerSettingsNew,
+                            contentDescription = null,
+                            tint = Color(0xFFDC2626),
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "End session",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                            color = Color(0xFFDC2626)
+                        )
+                    }
                 }
             } else {
                 Box(
@@ -1995,7 +2361,12 @@ fun AttendanceQrModal(
                         .background(colors.brandTint),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.QrCodeScanner, contentDescription = null, tint = colors.brandPrimary, modifier = Modifier.size(36.dp))
+                    Icon(
+                        imageVector = Icons.Default.QrCodeScanner,
+                        contentDescription = null,
+                        tint = colors.brandPrimary,
+                        modifier = Modifier.size(36.dp)
+                    )
                 }
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
@@ -2033,13 +2404,23 @@ fun AttendanceQrModal(
                 Spacer(modifier = Modifier.height(12.dp))
                 Button(
                     onClick = onOpenSession,
-                    colors = ButtonDefaults.buttonColors(containerColor = colors.brandPrimary),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5E7128)),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth().height(48.dp)
                 ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = colors.textInverse, modifier = Modifier.size(20.dp))
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Open Attendance Session", fontWeight = FontWeight.SemiBold, fontSize = 14.5.sp, color = colors.textInverse)
+                    Text(
+                        text = "Open Attendance Session",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.5.sp,
+                        color = Color.White
+                    )
                 }
             }
         }
@@ -2446,7 +2827,7 @@ fun AttendanceScreenView(
     onOpenQrModal: () -> Unit,
     onApproveRequest: (String) -> Unit,
     onRejectRequest: (String) -> Unit,
-    onManualMark: (RosterItem) -> Unit,
+    onManualMark: (RosterItem?) -> Unit,
     onOpenHelp: () -> Unit = {},
     onOpenFilterAttendance: () -> Unit = {},
     onEmployeeClick: (EmployeeItem) -> Unit = {}
@@ -2526,7 +2907,7 @@ fun AttendanceMarkSubTab(
     session: AttendanceSession?,
     roster: List<RosterItem>,
     onOpenQrModal: () -> Unit,
-    onManualMark: (RosterItem) -> Unit,
+    onManualMark: (RosterItem?) -> Unit,
     onEmployeeClick: (EmployeeItem) -> Unit = {}
 ) {
     val colors = LocalBizoraColors.current
@@ -2545,7 +2926,7 @@ fun AttendanceMarkSubTab(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable {
-                        if (roster.isNotEmpty()) onManualMark(roster.first())
+                        onManualMark(roster.firstOrNull())
                     }
             ) {
                 Row(
@@ -2601,33 +2982,42 @@ fun AttendanceMarkSubTab(
                     }
                     Spacer(modifier = Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = if (isOpen) "Attendance Session" else "Open Attendance Session",
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = colors.textPrimary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isOpen) "Attendance Session" else "Open Attendance Session",
+                            fontSize = 15.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.textPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             Surface(
-                                color = if (isOpen) Color(0xFFDCFCE7) else colors.surfaceMuted,
-                                shape = RoundedCornerShape(6.dp)
+                                color = if (isOpen) Color(0xFFDCFCE7) else (if (colors.isDark) Color(0xFF262C22) else Color(0xFFF1F5E9)),
+                                shape = RoundedCornerShape(6.dp),
+                                border = BorderStroke(1.dp, if (isOpen) Color(0xFF86EFAC) else (if (colors.isDark) Color(0xFF374230) else Color(0xFFE2E8D8)))
                             ) {
                                 Text(
                                     text = if (isOpen) "Active" else "Inactive",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = if (isOpen) Color(0xFF16A34A) else colors.textSecondary,
+                                    maxLines = 1,
+                                    softWrap = false,
                                     modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                                 )
                             }
+                            Text(
+                                text = "Front-desk live QR code session",
+                                fontSize = 12.sp,
+                                color = colors.textSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
-                        Text(
-                            text = "Front-desk live QR code session for workforce check-ins",
-                            fontSize = 12.5.sp,
-                            color = colors.textSecondary,
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
                     }
                     Icon(Icons.Default.ChevronRight, contentDescription = null, tint = colors.textSecondary, modifier = Modifier.size(22.dp))
                 }
@@ -2645,7 +3035,7 @@ fun AttendanceMarkSubTab(
             )
         }
 
-        items(roster) { item ->
+        items(roster, key = { it.memberId }) { item ->
             RosterCard(
                 item = item,
                 onManualEdit = { onManualMark(item) },
@@ -2752,7 +3142,7 @@ fun AttendanceRequestsSubTab(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(bottom = 20.dp)
             ) {
-                items(filtered) { request ->
+                items(filtered, key = { it.id }) { request ->
                     AttendanceRequestCard(
                         request = request,
                         onApprove = { onApprove(request.id) },
@@ -2889,7 +3279,7 @@ fun AttendanceDailySubTab(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(bottom = 20.dp)
             ) {
-                items(filtered) { member ->
+                items(filtered, key = { it.memberId }) { member ->
                     RosterCard(
                         item = member,
                         onManualEdit = { onManualMark(member) },
@@ -3109,7 +3499,8 @@ fun TeamDirectoryCard(
     team: Team,
     members: List<EmployeeItem>,
     onAddMember: () -> Unit,
-    onViewMembers: () -> Unit
+    onViewMembers: () -> Unit,
+    onInvite: (() -> Unit)? = null
 ) {
     val colors = LocalBizoraColors.current
     val context = LocalContext.current
@@ -3280,19 +3671,20 @@ fun TeamDirectoryCard(
             // Action Buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 // Add Member to this team
                 Button(
                     onClick = onAddMember,
                     colors = ButtonDefaults.buttonColors(containerColor = colors.brandPrimary),
                     shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp),
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.PersonAdd, contentDescription = null, tint = colors.textInverse, modifier = Modifier.size(15.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Add Member", fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold, color = colors.textInverse)
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Add", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.textInverse)
                 }
 
                 // View members
@@ -3300,10 +3692,24 @@ fun TeamDirectoryCard(
                     onClick = onViewMembers,
                     border = BorderStroke(1.dp, colors.border),
                     shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Text("View Roster", fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
+                    Text("Roster", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
+                }
+
+                if (onInvite != null) {
+                    OutlinedButton(
+                        onClick = onInvite,
+                        border = BorderStroke(1.dp, colors.brandPrimary.copy(alpha = 0.45f)),
+                        colors = ButtonDefaults.outlinedButtonColors(containerColor = colors.brandTint.copy(alpha = 0.25f)),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 7.dp)
+                    ) {
+                        Icon(Icons.Default.QrCode2, contentDescription = "Team Invite", tint = colors.brandPrimary, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Invite", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.brandPrimary)
+                    }
                 }
             }
         }
@@ -3314,20 +3720,23 @@ fun TeamDirectoryCard(
 fun EmployeesScreenView(
     employees: List<EmployeeItem>,
     teams: List<Team> = emptyList(),
+    joinRequests: List<EmployerJoinRequestItem> = emptyList(),
     isEmployeesLoading: Boolean = false,
-    initialSubTab: String = "Teams",
+    initialSubTab: String = "All",
     initialSelectedTeamId: String? = null,
     onAddEmployeeClick: (String?) -> Unit,
     onCreateTeamClick: () -> Unit = {},
     onOpenJoinQr: (String?) -> Unit = {},
     onEmployeeClick: (EmployeeItem) -> Unit = {},
-    onCopyInviteLink: (String) -> Unit
+    onCopyInviteLink: (String) -> Unit,
+    onApproveJoinRequest: (String) -> Unit = {},
+    onRejectJoinRequest: (String) -> Unit = {}
 ) {
     val colors = LocalBizoraColors.current
     var subTab by remember(initialSubTab) { mutableStateOf(initialSubTab) }
     var searchQuery by remember { mutableStateOf("") }
     var selectedTeamId by remember(initialSelectedTeamId) { mutableStateOf(initialSelectedTeamId) }
-    val internalTabs = listOf("Teams", "All", "Active", "Invited", "Requests")
+    val internalTabs = listOf("All", "Active", "Invited", "Requests")
 
     if (isEmployeesLoading && employees.isEmpty()) {
         EmployerEmployeesSkeleton()
@@ -3361,42 +3770,26 @@ fun EmployeesScreenView(
             .fillMaxSize()
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
+        val invitedCount = employees.count { it.status.equals("INVITED", ignoreCase = true) }
+        val pendingRequests = remember(joinRequests) {
+            joinRequests.filter { it.status.equals("PENDING", ignoreCase = true) }
+        }
+
         // Internal Segmented Tabs Bar
         SegmentedSubTabs(
             tabs = internalTabs,
             selectedTab = subTab,
             onTabSelected = { subTab = it },
+            badges = buildMap {
+                if (invitedCount > 0) put("Invited", invitedCount)
+                if (pendingRequests.isNotEmpty()) put("Requests", pendingRequests.size)
+            },
             modifier = Modifier.padding(bottom = 12.dp)
         )
 
-        if (subTab == "Teams") {
-            // Header for Teams
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "Workplace Teams (${teams.size})",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = colors.textPrimary
-                )
-                Button(
-                    onClick = onCreateTeamClick,
-                    colors = ButtonDefaults.buttonColors(containerColor = colors.brandPrimary),
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = null, tint = colors.textInverse, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("New Team", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.textInverse)
-                }
-            }
-
-            if (teams.isEmpty()) {
+        if (subTab == "Requests") {
+            if (pendingRequests.isEmpty()) {
+                // Join Requests Empty State
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -3404,47 +3797,27 @@ fun EmployeesScreenView(
                     contentAlignment = Alignment.Center
                 ) {
                     EmptyState(
-                        illustration = { EmptyTeamIllustration(size = 90.dp) },
-                        title = "No Teams Created Yet",
-                        description = "Create teams (squads, departments or shifts) to group and organize your employees.",
-                        actionLabel = "Create First Team",
-                        onAction = onCreateTeamClick
+                        illustration = { DocCheckmarkIllustration(size = 90.dp) },
+                        title = "No Pending Join Requests",
+                        description = "When staff scan your team QR code or use a share link to join, pending requests appear here for approval."
                     )
                 }
             } else {
                 LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(bottom = 80.dp)
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp)
                 ) {
-                    items(teams) { team ->
-                        val teamMembers = employees.filter {
-                            it.teamId == team.id || it.teamName.equals(team.name, ignoreCase = true)
-                        }
-                        TeamDirectoryCard(
-                            team = team,
-                            members = teamMembers,
-                            onAddMember = { onAddEmployeeClick(team.id) },
-                            onViewMembers = {
-                                selectedTeamId = team.id
-                                subTab = "All"
-                            }
+                    items(pendingRequests, key = { it.realId }) { req ->
+                        WorkplaceJoinRequestCard(
+                            request = req,
+                            onApprove = { onApproveJoinRequest(req.realId) },
+                            onReject = { onRejectJoinRequest(req.realId) }
                         )
                     }
                 }
-            }
-        } else if (subTab == "Requests") {
-            // Join Requests Empty / List View
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
-                EmptyState(
-                    illustration = { DocCheckmarkIllustration(size = 90.dp) },
-                    title = "No Pending Join Requests",
-                    description = "When staff scan your workplace QR code to join, pending requests appear here."
-                )
             }
         } else {
             // Search Field
@@ -3515,7 +3888,7 @@ fun EmployeesScreenView(
                     }
 
                     // Individual Team Chips
-                    items(teams) { team ->
+                    items(teams, key = { it.id }) { team ->
                         val isSelected = selectedTeamId == team.id
                         val teamCount = employees.count {
                             it.teamId == team.id || it.teamName.equals(team.name, ignoreCase = true)
@@ -3601,6 +3974,39 @@ fun EmployeesScreenView(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(bottom = 80.dp)
             ) {
+                // Email Invitations Info Banner for Invited Tab
+                if (subTab == "Invited") {
+                    item {
+                        Surface(
+                            color = colors.brandTint.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, colors.brandPrimary.copy(alpha = 0.2f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 2.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = colors.brandPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "Direct Email Invitations: Employees invited by email join automatically without needing employer approval when they sign in. (QR code and link requests require approval under Requests)",
+                                    fontSize = 12.sp,
+                                    color = colors.textPrimary,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // Workplace Join QR & Link Card
                 item {
                     Surface(
@@ -3627,7 +4033,7 @@ fun EmployeesScreenView(
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("Team Invite QR & Link", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
-                                Text("Display scannable team QR or share direct invite link", fontSize = 12.sp, color = colors.textSecondary)
+                                Text("Display scannable team QR or share direct invite link (requires approval)", fontSize = 12.sp, color = colors.textSecondary)
                             }
                             Icon(Icons.Default.ChevronRight, contentDescription = null, tint = colors.brandPrimary, modifier = Modifier.size(20.dp))
                         }
@@ -3655,8 +4061,8 @@ fun EmployeesScreenView(
                         } else if (subTab == "Invited") {
                             EmptyState(
                                 illustration = { EnvelopePersonPlusIllustration(size = 90.dp) },
-                                title = "No invitations yet",
-                                description = "Add an employee email to invite them to this workplace.",
+                                title = "No email invitations yet",
+                                description = "Invite employees directly by email. They will automatically join their assigned team upon signing in without requiring your approval.",
                                 actionLabel = "Add employee",
                                 onAction = { onAddEmployeeClick(null) }
                             )
@@ -3673,9 +4079,10 @@ fun EmployeesScreenView(
                         }
                     }
                 } else {
-                    items(filtered) { employee ->
+                    items(filtered, key = { it.id }) { employee ->
                         EmployeeCard(
                             employee = employee,
+                            teams = teams,
                             onClick = { onEmployeeClick(employee) },
                             onCopyInvite = { onCopyInviteLink(employee.employeeCode) }
                         )
@@ -3687,24 +4094,33 @@ fun EmployeesScreenView(
 }
 
 // =========================================================================
-// 4. WORKPLACE SCREEN (WITH 2 INTERNAL TABS: Overview, Invite)
+// 4. WORKPLACE SCREEN (WITH 3 INTERNAL TABS: Overview, Teams, Invite)
 // =========================================================================
 
 @Composable
 fun WorkplaceScreenView(
     workplace: Workplace,
     repository: BizoraRepository,
+    teams: List<Team> = emptyList(),
+    employees: List<EmployeeItem> = emptyList(),
+    initialSubTab: String = "Overview",
+    onCreateTeamClick: () -> Unit = {},
+    onAddEmployeeClick: (String?) -> Unit = {},
+    onViewTeamMembers: (String) -> Unit = {},
     onSwitchWorkplace: () -> Unit,
     onOpenJoinQr: () -> Unit = {},
+    onOpenJoinQrForTeam: (String?) -> Unit = {},
     onShowRating: () -> Unit = {},
     onShowUpdate: () -> Unit = {},
+    onOpenProfile: () -> Unit = {},
+    onOpenSecurity: () -> Unit = {},
     onSignOut: () -> Unit
 ) {
     val colors = LocalBizoraColors.current
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    var subTab by remember { mutableStateOf("Overview") }
-    val internalTabs = listOf("Overview", "Invite")
+    var subTab by remember(initialSubTab) { mutableStateOf(initialSubTab) }
+    val internalTabs = listOf("Overview", "Teams", "Invite")
 
     var requireWifi by remember { mutableStateOf(workplace.attendanceSettings?.requireWifi ?: false) }
     var allowHistory by remember { mutableStateOf(workplace.attendanceSettings?.allowEmployeeViewHistory ?: true) }
@@ -3757,7 +4173,6 @@ fun WorkplaceScreenView(
                                 DetailRowItem(label = "Timezone", value = workplace.timezone)
                                 DetailRowItem(label = "Address", value = workplace.address ?: "Not set")
                                 DetailRowItem(label = "Office Wi-Fi SSID", value = workplace.wifiSsid ?: "Any network")
-                                DetailRowItem(label = "Workplace Code", value = (workplace.code?.takeIf { it.isNotBlank() } ?: workplace.formattedCode).uppercase())
                             }
                         }
                     }
@@ -3931,11 +4346,19 @@ fun WorkplaceScreenView(
                                         )
                                     },
                                     enabled = !isSavingSettings,
-                                    colors = ButtonDefaults.buttonColors(containerColor = colors.brandPrimary),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = colors.brandPrimary,
+                                        contentColor = Color.White
+                                    ),
                                     shape = RoundedCornerShape(10.dp),
                                     modifier = Modifier.fillMaxWidth().height(42.dp)
                                 ) {
-                                    Text(if (isSavingSettings) "Saving..." else "Save Attendance Settings", fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp)
+                                    Text(
+                                        text = if (isSavingSettings) "Saving..." else "Save Attendance Settings",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.5.sp,
+                                        color = Color.White
+                                    )
                                 }
                             }
                         }
@@ -3981,6 +4404,46 @@ fun WorkplaceScreenView(
                         }
                     }
 
+                    // Settings & Security Card
+                    item {
+                        Surface(
+                            color = colors.surface,
+                            shape = RoundedCornerShape(18.dp),
+                            border = BorderStroke(1.dp, colors.border),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text("Settings & Security", fontWeight = FontWeight.SemiBold, fontSize = 16.5.sp, color = colors.textPrimary)
+                                Text("Configure app lock, biometrics & profile", fontSize = 12.5.sp, color = colors.textSecondary)
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    OutlinedButton(
+                                        onClick = onOpenProfile,
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier.weight(1f).height(44.dp)
+                                    ) {
+                                        Icon(Icons.Default.Settings, contentDescription = null, tint = colors.brandPrimary, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Settings", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                    OutlinedButton(
+                                        onClick = onOpenSecurity,
+                                        shape = RoundedCornerShape(12.dp),
+                                        modifier = Modifier.weight(1f).height(44.dp)
+                                    ) {
+                                        Icon(Icons.Default.Security, contentDescription = null, tint = colors.brandPrimary, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("App Lock", fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Actions
                     item {
                         OutlinedButton(
@@ -4009,6 +4472,77 @@ fun WorkplaceScreenView(
                 }
             }
 
+            "Teams" -> {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                text = "Workplace Teams (${teams.size})",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.textPrimary
+                            )
+                            Text(
+                                text = "Squads, shifts & departments",
+                                fontSize = 12.5.sp,
+                                color = colors.textSecondary
+                            )
+                        }
+                        Button(
+                            onClick = onCreateTeamClick,
+                            colors = ButtonDefaults.buttonColors(containerColor = colors.brandPrimary),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, tint = colors.textInverse, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("New Team", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.textInverse)
+                        }
+                    }
+
+                    if (teams.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            EmptyState(
+                                illustration = { EmptyTeamIllustration(size = 90.dp) },
+                                title = "No Teams Created Yet",
+                                description = "Create teams (squads, departments or shifts) to group and organize your workplace members.",
+                                actionLabel = "Create First Team",
+                                onAction = onCreateTeamClick
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            contentPadding = PaddingValues(bottom = 80.dp)
+                        ) {
+                            items(teams, key = { it.id }) { team ->
+                                val teamMembers = employees.filter {
+                                    it.teamId == team.id || it.teamName.equals(team.name, ignoreCase = true)
+                                }
+                                TeamDirectoryCard(
+                                    team = team,
+                                    members = teamMembers,
+                                    onAddMember = { onAddEmployeeClick(team.id) },
+                                    onViewMembers = { onViewTeamMembers(team.id) },
+                                    onInvite = { onOpenJoinQrForTeam(team.id) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             "Invite" -> {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -4025,11 +4559,15 @@ fun WorkplaceScreenView(
                                 modifier = Modifier.padding(20.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Text("Workplace Join QR", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
-                                Text("Scan this QR code with the Bizora mobile app to join this workplace.", fontSize = 13.5.sp, color = colors.textSecondary, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
+                                Text("Team Join QR", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary)
+                                Text("Scan this QR code with the Bizora mobile app to join this team.", fontSize = 13.5.sp, color = colors.textSecondary, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp, bottom = 16.dp))
+
+                                val activeTeam = teams.firstOrNull()
+                                val displayTeamCode = activeTeam?.displayCode ?: ""
+                                val inviteToken = workplace.formattedCode
 
                                 QrCodeView(
-                                    content = "bizora://join?workplace=${workplace.id}",
+                                    content = "bizora://join?teamCode=$displayTeamCode&token=$inviteToken",
                                     size = 200.dp
                                 )
 
@@ -4045,18 +4583,17 @@ fun WorkplaceScreenView(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        val cleanCode = (workplace.code?.takeIf { it.isNotBlank() } ?: workplace.formattedCode).uppercase()
                                         Column {
-                                            Text("Workplace Code", fontSize = 11.5.sp, color = colors.textSecondary, fontWeight = FontWeight.SemiBold)
-                                            Text(cleanCode, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary, letterSpacing = 2.sp)
+                                            Text(if (activeTeam != null) "Team Code (${activeTeam.name})" else "Team Code", fontSize = 11.5.sp, color = colors.textSecondary, fontWeight = FontWeight.SemiBold)
+                                            Text("#$displayTeamCode", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = colors.textPrimary, letterSpacing = 2.sp)
                                         }
 
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             IconButton(
                                                 onClick = {
                                                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                                    clipboard.setPrimaryClip(ClipData.newPlainText("Workplace Code", cleanCode))
-                                                    Toast.makeText(context, "Code copied!", Toast.LENGTH_SHORT).show()
+                                                    clipboard.setPrimaryClip(ClipData.newPlainText("Team Code", displayTeamCode))
+                                                    Toast.makeText(context, "Team code copied: #$displayTeamCode", Toast.LENGTH_SHORT).show()
                                                 }
                                             ) {
                                                 Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = colors.brandPrimary, modifier = Modifier.size(22.dp))
@@ -4066,10 +4603,10 @@ fun WorkplaceScreenView(
                                                 onClick = {
                                                     val sendIntent = Intent().apply {
                                                         action = Intent.ACTION_SEND
-                                                        putExtra(Intent.EXTRA_TEXT, "Join my workplace ${workplace.name} on Bizora: https://bizora.app/join?code=$cleanCode")
+                                                        putExtra(Intent.EXTRA_TEXT, "Join our team at ${workplace.name} on Bizora: https://bizora.app/join?teamCode=$displayTeamCode&token=$inviteToken")
                                                         type = "text/plain"
                                                     }
-                                                    context.startActivity(Intent.createChooser(sendIntent, "Share Workplace Invite"))
+                                                    context.startActivity(Intent.createChooser(sendIntent, "Share Team Invite"))
                                                 }
                                             ) {
                                                 Icon(Icons.Default.Share, contentDescription = "Share", tint = colors.brandPrimary, modifier = Modifier.size(22.dp))
@@ -4197,10 +4734,20 @@ fun RosterCard(item: RosterItem, onManualEdit: () -> Unit, onClick: (() -> Unit)
 @Composable
 fun EmployeeCard(
     employee: EmployeeItem,
+    teams: List<Team> = emptyList(),
     onClick: () -> Unit = {},
     onCopyInvite: () -> Unit
 ) {
     val colors = LocalBizoraColors.current
+    val resolvedTeamName = employee.teamName.takeIf { !it.isNullOrBlank() }
+        ?: teams.find { it.id == employee.teamId }?.name
+        ?: "General"
+    val resolvedTeamColor = teams.find {
+        it.name.equals(resolvedTeamName, ignoreCase = true) || it.id == employee.teamId
+    }?.let {
+        runCatching { Color(android.graphics.Color.parseColor(it.color)) }.getOrNull()
+    } ?: colors.brandPrimary
+
     Surface(
         color = colors.surface,
         shape = RoundedCornerShape(16.dp),
@@ -4230,18 +4777,52 @@ fun EmployeeCard(
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = employee.name, fontWeight = FontWeight.SemiBold, fontSize = 15.5.sp, color = colors.textPrimary)
-                Text(
-                    text = "${employee.employeeCode} • ${employee.invitedEmail ?: "PIN only"}",
-                    fontSize = 13.sp,
-                    color = colors.textSecondary
-                )
-                if (!employee.teamName.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(2.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(top = 3.dp)
+                ) {
                     Text(
-                        text = "Team: ${employee.teamName}",
-                        fontSize = 11.5.sp,
+                        text = employee.employeeCode,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,
-                        color = colors.brandPrimary
+                        color = colors.textSecondary
+                    )
+                    Text(text = "•", fontSize = 12.sp, color = colors.border)
+                    // Aesthetic Team Tag Chip
+                    Surface(
+                        color = resolvedTeamColor.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(resolvedTeamColor)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = resolvedTeamName,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = resolvedTeamColor
+                            )
+                        }
+                    }
+                }
+
+                if (!employee.invitedEmail.isNullOrBlank()) {
+                    Text(
+                        text = employee.invitedEmail!!,
+                        fontSize = 12.sp,
+                        color = colors.textSecondary.copy(alpha = 0.8f),
+                        maxLines = 1,
+                        modifier = Modifier.padding(top = 2.dp)
                     )
                 }
             }
