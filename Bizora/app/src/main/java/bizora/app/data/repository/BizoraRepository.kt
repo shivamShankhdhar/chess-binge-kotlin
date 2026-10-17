@@ -252,9 +252,9 @@ class BizoraRepository(private val preferencesManager: PreferencesManager) {
 
                 preferencesManager.setMemoryAccessToken(body.accessToken)
 
-                // Map memberships if provided
-                if (!body.memberships.isNullOrEmpty()) {
-                    val mapped = body.memberships.map { m ->
+                // Map memberships if provided or fetch from API
+                var mapped = if (!body.memberships.isNullOrEmpty()) {
+                    body.memberships.map { m ->
                         Workplace(
                             id = m.workplaceId,
                             name = m.workplaceName ?: "Workplace",
@@ -265,12 +265,25 @@ class BizoraRepository(private val preferencesManager: PreferencesManager) {
                             code = m.workplaceCode
                         )
                     }
-                    _workplaces.value = mapped
-                    val active = mapped.first()
-                    _activeWorkplace.value = active
-                    _isWorkplaceConfirmed.value = (mapped.size <= 1)
+                } else {
+                    emptyList()
+                }
+
+                if (mapped.isEmpty()) {
+                    val wpRes = try { ApiClient.service.getWorkplaces() } catch (_: Throwable) { null }
+                    if (wpRes != null && wpRes.success && !wpRes.data.isNullOrEmpty()) {
+                        mapped = wpRes.data
+                    }
+                }
+
+                _workplaces.value = mapped
+                val active = mapped.firstOrNull()
+                _activeWorkplace.value = active
+                _isWorkplaceConfirmed.value = true
+                if (active != null) {
                     preferencesManager.setActiveWorkplace(active)
                 }
+                preferencesManager.setWorkplaceConfirmed(true)
 
                 try { checkMpinStatus() } catch (_: Throwable) {}
 
@@ -332,13 +345,14 @@ class BizoraRepository(private val preferencesManager: PreferencesManager) {
                 _workplaces.value = wps
                 val active = if (wps.isEmpty()) null else wps.firstOrNull()
                 _activeWorkplace.value = active
-                _isWorkplaceConfirmed.value = (wps.size == 1)
+                val isSingleEmployee = (wps.size == 1 && active?.role == WorkplaceRole.EMPLOYEE)
+                _isWorkplaceConfirmed.value = isSingleEmployee
                 if (active != null) {
                     preferencesManager.setActiveWorkplace(active)
                 } else {
                     preferencesManager.clearActiveWorkplace()
-                    preferencesManager.setWorkplaceConfirmed(false)
                 }
+                preferencesManager.setWorkplaceConfirmed(isSingleEmployee)
 
                 try { checkMpinStatus() } catch (_: Throwable) {}
 
@@ -804,9 +818,10 @@ class BizoraRepository(private val preferencesManager: PreferencesManager) {
         } catch (_: Throwable) {
         }
         bizora.app.utils.MpinSecurityManager.clear()
-        preferencesManager.clearAuth()
+        preferencesManager.clearAuth(clearDeviceLock = true)
         preferencesManager.clearLocalMpinVerifier()
         preferencesManager.clearActiveWorkplace()
+        preferencesManager.setWorkplaceConfirmed(false)
         _currentUser.value = null
         _activeWorkplace.value = null
         _workplaces.value = emptyList()
@@ -842,6 +857,9 @@ class BizoraRepository(private val preferencesManager: PreferencesManager) {
 
     fun resetWorkplaceConfirmation() {
         _isWorkplaceConfirmed.value = false
+        repositoryScope.launch {
+            preferencesManager.setWorkplaceConfirmed(false)
+        }
     }
 
     suspend fun createWorkplace(

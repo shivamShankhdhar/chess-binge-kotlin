@@ -42,7 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import bizora.app.R
 import bizora.app.data.repository.BizoraRepository
-import bizora.app.ui.components.BizoraEditorialMonogram
+import bizora.app.ui.components.BizoraSignInIcon
 import bizora.app.ui.theme.LocalBizoraColors
 import kotlinx.coroutines.launch
 
@@ -65,6 +65,40 @@ fun PinLoginScreen(
 
     var isEmployeeIdFocused by remember { mutableStateOf(false) }
     var isPinFocused by remember { mutableStateOf(false) }
+
+    fun performLogin() {
+        if (isLoading) return
+        val cleanId = employeeId.trim().uppercase()
+        val cleanPin = pin.trim()
+        if (cleanId.isBlank()) {
+            errorMessage = "Please enter your employee ID."
+            return
+        }
+        if (cleanPin.length < 4) {
+            errorMessage = "Please enter a valid 4–6 digit PIN."
+            return
+        }
+        if (repository == null) {
+            errorMessage = "Service unavailable. Please restart the app."
+            return
+        }
+        coroutineScope.launch {
+            isLoading = true
+            errorMessage = null
+            try {
+                val result = repository.loginWithPin(cleanId, cleanPin)
+                if (result.isSuccess) {
+                    onLoginSuccess()
+                } else {
+                    errorMessage = result.exceptionOrNull()?.message ?: "Login failed. Check your credentials."
+                }
+            } catch (e: Exception) {
+                errorMessage = e.localizedMessage ?: "Login failed. Please check your connection."
+            } finally {
+                isLoading = false
+            }
+        }
+    }
 
     val canvasColor = if (colors.isDark) Color(0xFF141A10) else Color(0xFFFAFBF7)
     val cardBackground = if (colors.isDark) Color(0xFF1F2818) else Color.White
@@ -126,19 +160,7 @@ fun PinLoginScreen(
                 ) {
                     // Bizora Brand Badge + Name
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF3D4E26)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            BizoraEditorialMonogram(
-                                size = 20.dp,
-                                primaryColor = Color.White,
-                                amberColor = Color(0xFFF2994A)
-                            )
-                        }
+                        BizoraSignInIcon()
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
                             text = "Bizora",
@@ -368,13 +390,7 @@ fun PinLoginScreen(
                                         imeAction = ImeAction.Done
                                     ),
                                     keyboardActions = KeyboardActions(
-                                        onDone = {
-                                            if (employeeId.isBlank() || pin.length < 4) {
-                                                errorMessage = "Enter your employee ID and a 4–6 digit PIN."
-                                            } else {
-                                                onLoginSuccess()
-                                            }
-                                        }
+                                        onDone = { performLogin() }
                                     ),
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -405,19 +421,22 @@ fun PinLoginScreen(
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = colors.danger,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     text = errorMessage!!,
                                     color = colors.danger,
-                                    fontSize = 13.5.sp
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "Tap here to preview employee dashboard →",
-                                    color = oliveBrand,
                                     fontSize = 13.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    modifier = Modifier.clickable { onLoginSuccess() }
+                                    lineHeight = 18.sp
                                 )
                             }
                         }
@@ -427,30 +446,7 @@ fun PinLoginScreen(
 
                     // Deep Olive Submit Button: Sign in ->
                     Button(
-                        onClick = {
-                            if (employeeId.isBlank() || pin.length < 4) {
-                                errorMessage = "Enter your employee ID and a 4–6 digit PIN."
-                            } else if (repository != null) {
-                                coroutineScope.launch {
-                                    isLoading = true
-                                    errorMessage = null
-                                    try {
-                                        val result = repository.loginWithPin(employeeId, pin)
-                                        if (result.isSuccess) {
-                                            onLoginSuccess()
-                                        } else {
-                                            errorMessage = result.exceptionOrNull()?.message ?: "Login failed. Check your credentials."
-                                        }
-                                    } catch (e: Exception) {
-                                        errorMessage = e.localizedMessage ?: "Login failed"
-                                    } finally {
-                                        isLoading = false
-                                    }
-                                }
-                            } else {
-                                onLoginSuccess()
-                            }
-                        },
+                        onClick = { performLogin() },
                         enabled = !isLoading,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = oliveButton,

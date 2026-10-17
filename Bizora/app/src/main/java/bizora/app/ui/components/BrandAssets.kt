@@ -2,31 +2,44 @@ package bizora.app.ui.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import bizora.app.R
 import bizora.app.ui.theme.LocalBizoraColors
 
+/** Shared app icon badge for the sign-in screens. */
+@Composable
+fun BizoraSignInIcon(modifier: Modifier = Modifier, size: Dp = 36.dp) {
+    Box(
+        modifier = modifier.size(size).clip(RoundedCornerShape(size * 0.28f)).background(Color(0xFFECEFDE)),
+        contentAlignment = Alignment.Center
+    ) {
+        BizoraEditorialMonogram(size = size * 0.72f)
+    }
+}
 
 /**
  * Bizora Editorial Monogram (used on primary sign in and employee sign in header)
- * Features modern letter B with bottom-left amber progress accent.
+ * Features official brand logo emblem.
  */
 @Composable
 fun BizoraEditorialMonogram(
@@ -35,55 +48,11 @@ fun BizoraEditorialMonogram(
     amberColor: Color = Color(0xFFF2994A),
     primaryColor: Color = Color.White
 ) {
-    Canvas(modifier = modifier.size(size, size * 1.15f)) {
-        val s = this.size.width / 32f
-
-        scale(s, s, pivot = Offset.Zero) {
-            // Main stem top part
-            drawRoundRect(
-                color = primaryColor,
-                topLeft = Offset(4f, 3f),
-                size = Size(6.5f, 16f),
-                cornerRadius = CornerRadius(3f, 3f)
-            )
-
-            // Bottom-left amber block
-            drawRoundRect(
-                color = amberColor,
-                topLeft = Offset(4f, 20.5f),
-                size = Size(6.5f, 10.5f),
-                cornerRadius = CornerRadius(3f, 3f)
-            )
-
-            // Top loop of 'B'
-            val topLoop = Path().apply {
-                moveTo(9f, 6f)
-                lineTo(19f, 6f)
-                cubicTo(24f, 6f, 26.5f, 8.5f, 26.5f, 12.5f)
-                cubicTo(26.5f, 16.5f, 24f, 18.5f, 19f, 18.5f)
-                lineTo(9f, 18.5f)
-            }
-            drawPath(
-                path = topLoop,
-                color = primaryColor,
-                style = Stroke(width = 6f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            )
-
-            // Lower loop of 'B'
-            val botLoop = Path().apply {
-                moveTo(9f, 18.5f)
-                lineTo(20f, 18.5f)
-                cubicTo(25.5f, 18.5f, 28.5f, 21f, 28.5f, 25.5f)
-                cubicTo(28.5f, 30f, 25.5f, 32f, 20f, 32f)
-                lineTo(9f, 32f)
-            }
-            drawPath(
-                path = botLoop,
-                color = primaryColor,
-                style = Stroke(width = 6f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            )
-        }
-    }
+    Image(
+        painter = painterResource(id = R.drawable.ic_bizora_logo),
+        contentDescription = "Bizora Logo",
+        modifier = modifier.size(size)
+    )
 }
 
 /**
@@ -140,10 +109,8 @@ fun EmployeeBadgeIcon(
 }
 
 /**
- * Bizora Brand Mark
- * Combines dynamic "B" monogram with interconnected workforce & attendance nodes
- * and a central golden status synchronization hub.
- * ViewBox: 0 0 48 48
+ * Bizora Brand Mark / Logo
+ * Official dual-tone forward-pointing arrow emblem (olive green & warm amber).
  */
 @Composable
 fun BizoraMark(
@@ -151,75 +118,11 @@ fun BizoraMark(
     size: Dp = 40.dp,
     color: Color = LocalBizoraColors.current.brandPrimary
 ) {
-    Canvas(modifier = modifier.size(size)) {
-        val scaleX = this.size.width / 48f
-        val scaleY = this.size.height / 48f
-
-        scale(scaleX, scaleY, pivot = Offset.Zero) {
-            // Outer squircle badge: <Rect x="2" y="2" width="44" height="44" rx="13" fill={color} />
-            drawRoundRect(
-                color = color,
-                topLeft = Offset(2f, 2f),
-                size = Size(44f, 44f),
-                cornerRadius = CornerRadius(13f, 13f)
-            )
-
-            // Left Operations Stem (Pillar of "B"): <Rect x="12" y="11" width="5.5" height="26" rx="2.75" fill="#FFFFFF" />
-            drawRoundRect(
-                color = Color.White,
-                topLeft = Offset(12f, 11f),
-                size = Size(5.5f, 26f),
-                cornerRadius = CornerRadius(2.75f, 2.75f)
-            )
-
-            // Upper Loop of "B": M15 14H26C29.8 14 32.5 16.2 32.5 19C32.5 21.8 29.8 24 26 24H15
-            val upperPath = Path().apply {
-                moveTo(15f, 14f)
-                lineTo(26f, 14f)
-                cubicTo(29.8f, 14f, 32.5f, 16.2f, 32.5f, 19f)
-                cubicTo(32.5f, 21.8f, 29.8f, 24f, 26f, 24f)
-                lineTo(15f, 24f)
-            }
-            drawPath(
-                path = upperPath,
-                color = Color.White,
-                style = Stroke(
-                    width = 4.5f,
-                    cap = StrokeCap.Round,
-                    join = StrokeJoin.Round
-                )
-            )
-
-            // Lower Loop of "B": M15 24H27.5C31.5 24 34.5 26.3 34.5 29.5C34.5 32.7 31.5 34 27.5 34H15
-            val lowerPath = Path().apply {
-                moveTo(15f, 24f)
-                lineTo(27.5f, 24f)
-                cubicTo(31.5f, 24f, 34.5f, 26.3f, 34.5f, 29.5f)
-                cubicTo(34.5f, 32.7f, 31.5f, 34f, 27.5f, 34f)
-                lineTo(15f, 34f)
-            }
-            drawPath(
-                path = lowerPath,
-                color = Color.White,
-                style = Stroke(
-                    width = 4.5f,
-                    cap = StrokeCap.Round,
-                    join = StrokeJoin.Round
-                )
-            )
-
-            // Junction Nodes: white circles at (15, 14), (15, 24), (15, 34) r=2.5
-            drawCircle(color = Color.White, radius = 2.5f, center = Offset(15f, 14f))
-            drawCircle(color = Color.White, radius = 2.5f, center = Offset(15f, 24f))
-            drawCircle(color = Color.White, radius = 2.5f, center = Offset(15f, 34f))
-
-            // Top Node (Workplace Network Hub): r=2.5 at (26, 19) fill #E5A93C
-            drawCircle(color = Color(0xFFE5A93C), radius = 2.5f, center = Offset(26f, 19f))
-
-            // Center Synchronization / Attendance Golden Pip: r=2.8 at (20, 24) fill #E5A93C
-            drawCircle(color = Color(0xFFE5A93C), radius = 2.8f, center = Offset(20f, 24f))
-        }
-    }
+    Image(
+        painter = painterResource(id = R.drawable.ic_bizora_logo),
+        contentDescription = "Bizora Logo",
+        modifier = modifier.size(size)
+    )
 }
 
 /**
@@ -645,4 +548,3 @@ fun SignInStorefrontVector(
         }
     }
 }
-

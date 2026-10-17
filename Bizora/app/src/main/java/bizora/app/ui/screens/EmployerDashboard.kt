@@ -125,6 +125,7 @@ fun EmployerDashboard(
     var pinEmployeeName by remember { mutableStateOf("") }
     var selectedEmployeeForActions by remember { mutableStateOf<EmployeeItem?>(null) }
     var viewingEmployeeDetails by remember { mutableStateOf<EmployeeItem?>(null) }
+    var viewingTeamDetails by remember { mutableStateOf<Team?>(null) }
     var exportedReportForEmployeeDetails by remember { mutableStateOf<ExportedReport?>(null) }
     var showFilterAttendanceModal by remember { mutableStateOf(false) }
     var filterAttendanceStatus by remember { mutableStateOf("ALL") }
@@ -209,6 +210,32 @@ fun EmployerDashboard(
             )
         }
 
+        return
+    }
+
+    // Dedicated Team Details Full Screen
+    if (viewingTeamDetails != null) {
+        val tm = viewingTeamDetails!!
+        TeamDetailsScreen(
+            team = tm,
+            employees = employees,
+            roster = roster,
+            workplaceName = activeWorkplace.name,
+            workplaceCode = activeWorkplace.formattedCode,
+            onBack = { viewingTeamDetails = null },
+            onEmployeeClick = { emp -> viewingEmployeeDetails = emp },
+            onAddEmployeeClick = { teamId ->
+                preselectedTeamIdForAdd = teamId
+                showAddEmployeeModal = true
+            },
+            onOpenJoinQrClick = { teamId ->
+                preselectedTeamIdForAdd = teamId
+                showJoinQrModal = true
+            },
+            onRefresh = {
+                repository.refreshWorkplaceDataAwait()
+            }
+        )
         return
     }
 
@@ -398,8 +425,13 @@ fun EmployerDashboard(
                                 activeTab = EmployerTab.WORKPLACE
                             },
                             onNavigateToTeamRoster = { teamId ->
-                                workplaceActiveSubTab = "Teams"
-                                activeTab = EmployerTab.WORKPLACE
+                                val t = teams.find { it.id == teamId }
+                                if (t != null) {
+                                    viewingTeamDetails = t
+                                } else {
+                                    workplaceActiveSubTab = "Teams"
+                                    activeTab = EmployerTab.WORKPLACE
+                                }
                             },
                             onNavigateToWorkplace = { activeTab = EmployerTab.WORKPLACE },
                             onAddEmployee = { teamId ->
@@ -472,8 +504,13 @@ fun EmployerDashboard(
                         showAddEmployeeModal = true
                     },
                     onViewTeamMembers = { teamId ->
-                        workplaceActiveSubTab = "Teams"
-                        activeTab = EmployerTab.WORKPLACE
+                        val t = teams.find { it.id == teamId }
+                        if (t != null) {
+                            viewingTeamDetails = t
+                        } else {
+                            workplaceActiveSubTab = "Teams"
+                            activeTab = EmployerTab.WORKPLACE
+                        }
                     },
                     onSwitchWorkplace = { showWorkplaceSwitcher = true },
                     onOpenJoinQr = {
@@ -3515,7 +3552,9 @@ fun TeamDirectoryCard(
         shape = RoundedCornerShape(18.dp),
         border = BorderStroke(1.dp, colors.border),
         shadowElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onViewMembers() }
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             // Header: Color Pill + Team Name + Code Pill + Default Badge

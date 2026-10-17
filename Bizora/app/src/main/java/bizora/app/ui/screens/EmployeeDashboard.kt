@@ -98,6 +98,7 @@ fun EmployeeDashboard(
     var showRatingModal by remember { mutableStateOf(false) }
     var showUpdateModal by remember { mutableStateOf(false) }
     var isPullRefreshing by remember { mutableStateOf(false) }
+    var viewingTeamDetails by remember { mutableStateOf<Team?>(null) }
 
     if (showSecuritySettingsScreen) {
         SecuritySettingsScreen(
@@ -116,6 +117,25 @@ fun EmployeeDashboard(
             onToggleTheme = onToggleTheme,
             isDark = isDark,
             onSignOut = onSignOut
+        )
+        return
+    }
+
+    if (viewingTeamDetails != null) {
+        val tm = viewingTeamDetails!!
+        TeamDetailsScreen(
+            team = tm,
+            employees = emptyList(),
+            roster = emptyList(),
+            workplaceName = activeWorkplace.name,
+            workplaceCode = activeWorkplace.formattedCode,
+            onBack = { viewingTeamDetails = null },
+            onEmployeeClick = {},
+            onAddEmployeeClick = {},
+            onOpenJoinQrClick = { showJoinQrModal = true },
+            onRefresh = {
+                repository.refreshWorkplaceDataAwait()
+            }
         )
         return
     }
@@ -326,6 +346,7 @@ fun EmployeeDashboard(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(6.dp))
                                             .background(colors.brandPrimary.copy(alpha = 0.12f))
+                                            .clickable { if (activeTeam != null) viewingTeamDetails = activeTeam }
                                             .padding(horizontal = 8.dp, vertical = 3.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {

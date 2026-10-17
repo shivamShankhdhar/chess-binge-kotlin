@@ -27,6 +27,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
 import bizora.app.data.model.Workplace
 import bizora.app.ui.theme.LocalBizoraColors
 
@@ -287,24 +289,35 @@ fun HomeHeaderOptions(
                     .clickable { onProfileClick() }
                     .padding(vertical = 2.dp, horizontal = 2.dp)
             ) {
-                val firstName = userName?.trim()?.split(" ")?.firstOrNull()?.replaceFirstChar { it.uppercase() } ?: "Shivam"
+                val firstName = userName?.trim()?.takeIf { it.isNotBlank() }?.split(" ")?.firstOrNull()?.replaceFirstChar { it.uppercase() } ?: "User"
                 val displayInitial = firstName.take(1).uppercase()
 
-                // Squircle Avatar Container (42x42, 14dp corner radius, 1dp border)
+                // Squircle Avatar Container (42x42, CircleShape, 1dp border)
                 Box(
                     modifier = Modifier
                         .size(42.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .clip(CircleShape)
                         .background(buttonBg)
-                        .border(1.dp, buttonBorder, RoundedCornerShape(14.dp)),
+                        .border(1.dp, buttonBorder, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = displayInitial,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = iconColor
-                    )
+                    if (!avatarUrl.isNullOrBlank()) {
+                        AsyncImage(
+                            model = avatarUrl,
+                            contentDescription = userName,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(CircleShape)
+                        )
+                    } else {
+                        Text(
+                            text = displayInitial,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = iconColor
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(12.dp))
@@ -315,16 +328,15 @@ fun HomeHeaderOptions(
                 ) {
                     Text(
                         text = "Hello, $firstName",
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = (-0.2).sp,
+                        fontSize = 18.5.sp,
+                        fontWeight = FontWeight.SemiBold,
                         color = colors.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = "Your workplace at a glance",
-                        fontSize = 12.5.sp,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.Normal,
                         color = colors.textSecondary,
                         maxLines = 1,
@@ -336,15 +348,15 @@ fun HomeHeaderOptions(
 
             Spacer(modifier = Modifier.width(12.dp))
 
-            // Right: Search & Notification Circular Buttons
+            // Right: Circular Search & Notification Buttons
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Search Button (Circular 40x40)
+                // Search Button (Circle 42x42)
                 Box(
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(42.dp)
                         .clip(CircleShape)
                         .background(buttonBg)
                         .border(1.dp, buttonBorder, CircleShape)
@@ -359,7 +371,7 @@ fun HomeHeaderOptions(
 
                 // Notifications Bell Button + Docked Unread Badge
                 Box(
-                    modifier = Modifier.size(40.dp),
+                    modifier = Modifier.size(42.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Box(
@@ -382,7 +394,7 @@ fun HomeHeaderOptions(
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopEnd)
-                                .offset(x = 2.dp, y = (-2).dp)
+                                .offset(x = 3.dp, y = (-3).dp)
                                 .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
                                 .clip(CircleShape)
                                 .background(colors.brandPrimary)
